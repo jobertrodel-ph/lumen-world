@@ -10,7 +10,11 @@ export interface PlayerProfile {
 
 let game: Phaser.Game | null = null;
 
-export function startGame(parent: HTMLElement, profile: PlayerProfile) {
+export function startGame(
+  parent: HTMLElement,
+  profile: PlayerProfile,
+  idToken: string
+) {
   if (game) return game;
 
   game = new Phaser.Game({
@@ -25,7 +29,6 @@ export function startGame(parent: HTMLElement, profile: PlayerProfile) {
       default: 'arcade',
       arcade: { gravity: { x: 0, y: 0 }, debug: false },
     },
-    // We want SMOOTH, not pixel-perfect — this is the modern look.
     pixelArt: false,
     antialias: true,
     roundPixels: false,
@@ -33,6 +36,7 @@ export function startGame(parent: HTMLElement, profile: PlayerProfile) {
     callbacks: {
       postBoot: (g) => {
         g.registry.set('profile', profile);
+        g.registry.set('idToken', idToken);
       },
     },
   });

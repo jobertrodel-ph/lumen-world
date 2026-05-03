@@ -1,22 +1,45 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { startGame, destroyGame } from '../game/PhaserGame';
 
 export default function GameContainer() {
   const { user, logout } = useAuth();
   const mountRef = useRef<HTMLDivElement>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
 
   useEffect(() => {
     const node = mountRef.current;
     if (!node || !user) return;
 
-    startGame(node, {
-      uid: user.uid,
-      displayName: user.displayName || 'Visitor',
-      photoURL: user.photoURL ?? undefined,
-    });
+    let cancelled = false;
 
-    return () => destroyGame();
+    const boot = async () => {
+      try {
+        // forceRefresh=false — Firebase auto-refreshes when needed.
+        const idToken = await user.getIdToken();
+        if (cancelled || !mountRef.current) return;
+
+        startGame(
+          mountRef.current,
+          {
+            uid: user.uid,
+            displayName: user.displayName || 'Visitor',
+            photoURL: user.photoURL ?? undefined,
+          },
+          idToken
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to start game';
+        setBootError(msg);
+      }
+    };
+
+    boot();
+
+    return () => {
+      cancelled = true;
+      destroyGame();
+    };
   }, [user]);
 
   return (
@@ -39,6 +62,12 @@ export default function GameContainer() {
       </div>
 
       <div ref={mountRef} className="game__canvas" />
+
+      {bootError && (
+        <div className="hud-error" role="alert">
+          {bootError}
+        </div>
+      )}
 
       <div className="hud-controls">
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
