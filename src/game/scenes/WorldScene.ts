@@ -9,6 +9,7 @@ import { registerVoiceManager } from '../voice/voiceBridge';
 import { AvatarSprite } from '../avatars/AvatarSprite';
 import { getAvatarStyle } from '../../shared/avatars';
 import { ROOMS, RoomId, isBlocked, zoneAt, ZONE_NAMES } from '../../shared/world-helpers';
+import { readJoystick } from '../input/inputBridge';
 
 const WALK_SPEED = 220;
 const AVATAR_RADIUS = 20;
@@ -95,7 +96,10 @@ export default class WorldScene extends Phaser.Scene {
 
     this.updateCameraBounds();
     this.cameras.main.startFollow(this.avatarSprite.container, true, 0.12, 0.12);
-    this.cameras.main.setZoom(1.25);
+    this.applyResponsiveZoom();
+
+    // Re-apply zoom when the canvas resizes (rotation, resize, devtools open).
+    this.scale.on('resize', () => this.applyResponsiveZoom());
 
     this.cursors = this.input.keyboard!.createCursorKeys();
     this.wasd = this.input.keyboard!.addKeys('W,A,S,D') as WASDKeys;
@@ -126,6 +130,19 @@ export default class WorldScene extends Phaser.Scene {
     if (httpServerUrl) {
       this.connectVoice(httpServerUrl, idToken);
     }
+  }
+
+  /**
+   * Adjust zoom based on viewport size. On phones we want to zoom IN so
+   * avatars don't look like specks; on desktop we keep the wider view so
+   * you can see more of the room.
+   */
+  private applyResponsiveZoom(): void {
+    const w = this.scale.width;
+    let zoom = 1.25;
+    if (w < 500) zoom = 1.7;
+    else if (w < 820) zoom = 1.45;
+    this.cameras.main.setZoom(zoom);
   }
 
   private async connectVoice(httpServerUrl: string, idToken: string): Promise<void> {
@@ -277,12 +294,23 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   update(time: number, delta: number) {
+    // Combine keyboard + joystick input. Keyboard wins if both are pressed
+    // (the joystick is fully released to 0,0 anyway when not touched).
     let vx = 0, vy = 0;
     if (this.cursors.left.isDown || this.wasd.A.isDown) vx -= 1;
     if (this.cursors.right.isDown || this.wasd.D.isDown) vx += 1;
     if (this.cursors.up.isDown || this.wasd.W.isDown) vy -= 1;
     if (this.cursors.down.isDown || this.wasd.S.isDown) vy += 1;
-    if (vx !== 0 && vy !== 0) { const inv = 1 / Math.SQRT2; vx *= inv; vy *= inv; }
+
+    if (vx === 0 && vy === 0) {
+      const j = readJoystick();
+      vx = j.x;
+      vy = j.y;
+    } else if (vx !== 0 && vy !== 0) {
+      const inv = 1 / Math.SQRT2;
+      vx *= inv;
+      vy *= inv;
+    }
 
     const step = (delta / 1000) * WALK_SPEED;
     let nextX = this.avatarX + vx * step;
@@ -297,10 +325,9 @@ export default class WorldScene extends Phaser.Scene {
     this.avatarSprite.container.setPosition(this.avatarX, this.avatarY);
     this.nameTag.setPosition(this.avatarX, this.avatarY - 38);
 
-    // Drive local sprite animation off intent.
-    const moving = vx !== 0 || vy !== 0;
+    const moving = Math.hypot(vx, vy) > 0.05;
     this.avatarSprite.setMoving(moving);
-    if (vx !== 0) this.avatarSprite.setFacing(vx);
+    if (Math.abs(vx) > 0.05) this.avatarSprite.setFacing(vx);
 
     this.remotes.forEach((r) => r.tick());
 

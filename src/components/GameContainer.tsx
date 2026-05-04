@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { startGame, destroyGame } from '../game/PhaserGame';
 import { toggleMic } from '../game/voice/voiceBridge';
+import { TouchJoystick } from './TouchJoystick';
+import { RotateHint } from './RotateHint';
+import { useViewport } from './useViewport';
 
 export default function GameContainer({ avatarId }: { avatarId: string }) {
   const { user, logout } = useAuth();
@@ -10,6 +13,14 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
   const [voiceReady, setVoiceReady] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [micBusy, setMicBusy] = useState(false);
+
+  const { isTouch, isSmall, isPortrait } = useViewport();
+
+  // Joystick condition: device is touch AND viewport is small. Hides
+  // joystick on, e.g., a touch-laptop with a wide screen.
+  const showJoystick = isTouch && isSmall;
+  // Rotate hint only when small AND touch AND in portrait.
+  const showRotateHint = isTouch && isSmall && isPortrait;
 
   useEffect(() => {
     const node = mountRef.current;
@@ -55,7 +66,7 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
   };
 
   return (
-    <div className="game">
+    <div className={`game ${showJoystick ? 'game--touch' : ''}`}>
       <div className="hud">
         <div className="hud__pill">
           {user?.photoURL ? (
@@ -78,7 +89,9 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
             aria-label={micOn ? 'Mute' : 'Unmute'}
           >
             <MicIcon on={micOn} />
-            <span>{micOn ? 'Mic on' : voiceReady ? 'Mic off' : 'Connecting…'}</span>
+            <span className="hud__mic-label">
+              {micOn ? 'Mic on' : voiceReady ? 'Mic off' : 'Connecting…'}
+            </span>
           </button>
 
           <button type="button" className="hud__logout" onClick={logout}>
@@ -91,10 +104,16 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
 
       {bootError && <div className="hud-error" role="alert">{bootError}</div>}
 
-      <div className="hud-controls">
-        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
-        <span>or arrow keys to move · walk close to hear</span>
-      </div>
+      {/* Keyboard hint — only useful when there's a real keyboard. */}
+      {!showJoystick && (
+        <div className="hud-controls">
+          <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
+          <span>or arrow keys to move · walk close to hear</span>
+        </div>
+      )}
+
+      {showJoystick && <TouchJoystick />}
+      {showRotateHint && <RotateHint />}
     </div>
   );
 }
