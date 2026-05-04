@@ -15,11 +15,7 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
   const [micBusy, setMicBusy] = useState(false);
 
   const { isTouch, isSmall, isPortrait } = useViewport();
-
-  // Joystick condition: device is touch AND viewport is small. Hides
-  // joystick on, e.g., a touch-laptop with a wide screen.
   const showJoystick = isTouch && isSmall;
-  // Rotate hint only when small AND touch AND in portrait.
   const showRotateHint = isTouch && isSmall && isPortrait;
 
   useEffect(() => {
@@ -50,6 +46,14 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
     return () => {
       cancelled = true;
       window.removeEventListener('lumen:voice-ready', onVoiceReady);
+
+      // Reset HUD state so signing back in starts clean. Without this,
+      // the next mount sees stale "voice ready" / "mic on" flags.
+      setVoiceReady(false);
+      setMicOn(false);
+      setMicBusy(false);
+      setBootError(null);
+
       destroyGame();
     };
   }, [user, avatarId]);
@@ -104,7 +108,6 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
 
       {bootError && <div className="hud-error" role="alert">{bootError}</div>}
 
-      {/* Keyboard hint — only useful when there's a real keyboard. */}
       {!showJoystick && (
         <div className="hud-controls">
           <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>

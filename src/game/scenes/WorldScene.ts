@@ -52,6 +52,9 @@ export default class WorldScene extends Phaser.Scene {
   private currentRoom: RoomId = 'atrium';
   private roomRenderer: RoomRenderer | null = null;
 
+  /** True after shutdown(); blocks late network handlers from touching dead objects. */
+  private destroyed = false;
+
   private lastSendAt = 0;
   private lastSentX = -Infinity;
   private lastSentY = -Infinity;
@@ -98,7 +101,6 @@ export default class WorldScene extends Phaser.Scene {
     this.cameras.main.startFollow(this.avatarSprite.container, true, 0.12, 0.12);
     this.applyResponsiveZoom();
 
-    // Re-apply zoom when the canvas resizes (rotation, resize, devtools open).
     this.scale.on('resize', () => this.applyResponsiveZoom());
 
     this.cursors = this.input.keyboard!.createCursorKeys();
@@ -132,11 +134,6 @@ export default class WorldScene extends Phaser.Scene {
     }
   }
 
-  /**
-   * Adjust zoom based on viewport size. On phones we want to zoom IN so
-   * avatars don't look like specks; on desktop we keep the wider view so
-   * you can see more of the room.
-   */
   private applyResponsiveZoom(): void {
     const w = this.scale.width;
     let zoom = 1.25;
@@ -152,11 +149,13 @@ export default class WorldScene extends Phaser.Scene {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: idToken }),
       });
-      if (!resp.ok) {
-        throw new Error(`token ${resp.status}: ${await resp.text()}`);
-      }
+      if (!resp.ok) throw new Error(`token ${resp.status}: ${await resp.text()}`);
       const data = (await resp.json()) as { token: string; url: string };
       if (!data.url) throw new Error('LIVEKIT_URL not configured on server');
+
+      // Bail if the scene was destroyed during the network round-trip.
+      if (this.destroyed) return;
+
       await this.voice.connect({
         serverUrl: data.url,
         token: data.token,
@@ -165,11 +164,15 @@ export default class WorldScene extends Phaser.Scene {
           onError: (msg) => this.showBanner(`voice: ${msg}`),
         },
       });
+      if (this.destroyed) {
+        this.voice.disconnect();
+        return;
+      }
       registerVoiceManager(this.voice);
       window.dispatchEvent(new CustomEvent('lumen:voice-ready'));
     } catch (err) {
       console.error('[voice] connect failed:', err);
-      this.showBanner(`voice unavailable: ${(err as Error).message}`);
+      if (!this.destroyed) this.showBanner(`voice unavailable: ${(err as Error).message}`);
     }
   }
 
@@ -201,7 +204,10 @@ export default class WorldScene extends Phaser.Scene {
       .setOrigin(0.5).setScrollFactor(0).setDepth(1000);
   }
 
+  // --- Network handlers — all guarded against late-arriving messages ---
+
   private handlePlayerAdd(sessionId: string, p: RemotePlayerData): void {
+    if (this.destroyed || !this.sys.isActive()) return;
     this.remoteData.set(sessionId, p);
     if (sessionId === this.network.sessionId) return;
     if (p.room !== this.currentRoom) return;
@@ -212,6 +218,7 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   private handlePlayerRemove(sessionId: string): void {
+    if (this.destroyed) return;
     const data = this.remoteData.get(sessionId);
     if (data) this.voice.setAudibility(data.uid, 0);
     this.remoteData.delete(sessionId);
@@ -220,6 +227,7 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   private handleRemoteMove(sessionId: string, x: number, y: number): void {
+    if (this.destroyed) return;
     const data = this.remoteData.get(sessionId);
     if (data) { data.x = x; data.y = y; }
     if (sessionId === this.network.sessionId) return;
@@ -227,6 +235,7 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   private handleRemoteRoomChange(sessionId: string, newRoom: RoomId): void {
+    if (this.destroyed || !this.sys.isActive()) return;
     const data = this.remoteData.get(sessionId);
     if (data) data.room = newRoom;
     const existing = this.remotes.get(sessionId);
@@ -243,6 +252,7 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   private handleSelfRoomChange(newRoom: RoomId, x: number, y: number): void {
+    if (this.destroyed || !this.sys.isActive()) return;
     if (newRoom === this.currentRoom) {
       this.avatarSprite.container.setPosition(x, y);
       this.avatarX = x; this.avatarY = y;
@@ -271,6 +281,7 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   private handleSpeakingChange(uid: string, speaking: boolean): void {
+    if (this.destroyed) return;
     for (const [sid, data] of this.remoteData) {
       if (data.uid !== uid) continue;
       this.remotes.get(sid)?.setSpeaking(speaking);
@@ -279,6 +290,7 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   private showBanner(message: string): void {
+    if (this.destroyed || !this.sys.isActive()) return;
     const banner = this.add
       .text(this.scale.width / 2, 90, message, {
         fontFamily: '"General Sans", system-ui, sans-serif',
@@ -294,8 +306,8 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   update(time: number, delta: number) {
-    // Combine keyboard + joystick input. Keyboard wins if both are pressed
-    // (the joystick is fully released to 0,0 anyway when not touched).
+    if (this.destroyed) return;
+
     let vx = 0, vy = 0;
     if (this.cursors.left.isDown || this.wasd.A.isDown) vx -= 1;
     if (this.cursors.right.isDown || this.wasd.D.isDown) vx += 1;
@@ -363,13 +375,19 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   shutdown() {
+    // Mark destroyed FIRST so any in-flight handlers bail before touching state.
+    this.destroyed = true;
+
     this.network.disconnect();
     this.voice.disconnect();
     registerVoiceManager(null);
+
     this.remotes.forEach((r) => r.destroy());
     this.remotes.clear();
     this.remoteData.clear();
+
     this.roomRenderer?.destroy();
+    this.roomRenderer = null;
     this.avatarSprite?.destroy();
     this.nameTag?.destroy();
   }
