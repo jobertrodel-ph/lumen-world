@@ -1,59 +1,43 @@
 import Phaser from 'phaser';
+import { AvatarSprite } from '../avatars/AvatarSprite';
+import { getAvatarStyle } from '../../shared/avatars';
 
 /**
- * RemotePlayer wraps the visuals (disc, initial, name tag, shadow) for someone
- * else's avatar in our world. The server pushes authoritative positions; we
- * smoothly lerp toward them so movement looks fluid even at low send rates.
+ * RemotePlayer wraps an AvatarSprite for someone else's avatar with smooth
+ * position interpolation toward the latest server position.
  */
 export class RemotePlayer {
-  readonly container: Phaser.GameObjects.Container;
+  readonly sprite: AvatarSprite;
+  readonly nameTag: Phaser.GameObjects.Text;
   private targetX: number;
   private targetY: number;
-
-  // Lerp factor per frame. Higher = snappier, lower = smoother but laggier.
-  // 0.18 at 60fps reaches ~95% of target in ~16 frames, which feels right
-  // for room-scale movement without looking floaty.
+  private lastX: number;
+  private lastY: number;
   private static readonly LERP = 0.18;
 
   constructor(
     scene: Phaser.Scene,
     x: number,
     y: number,
-    displayName: string
+    displayName: string,
+    avatarId: string
   ) {
     this.targetX = x;
     this.targetY = y;
+    this.lastX = x;
+    this.lastY = y;
+    this.sprite = new AvatarSprite(scene, x, y, getAvatarStyle(avatarId));
 
-    const container = scene.add.container(x, y);
-
-    const shadow = scene.add.ellipse(0, 24, 46, 14, 0x000000, 0.32);
-
-    // Cooler tint than the local player (peach) so you can spot yourself.
-    const body = scene.add.circle(0, 0, 22, 0x8a7fc4);
-    body.setStrokeStyle(2, 0xfff4ec, 0.95);
-
-    const initial = (displayName?.[0] ?? '?').toUpperCase();
-    const initialText = scene.add
-      .text(0, 1, initial, {
-        fontFamily: '"General Sans", system-ui, sans-serif',
-        fontSize: '20px',
-        fontStyle: 'bold',
-        color: '#1a142e',
-      })
-      .setOrigin(0.5);
-
-    const tag = scene.add
-      .text(0, -38, displayName || 'Visitor', {
+    this.nameTag = scene.add
+      .text(x, y - 38, displayName || 'Visitor', {
         fontFamily: '"General Sans", system-ui, sans-serif',
         fontSize: '13px',
         color: '#f3eee6',
         backgroundColor: 'rgba(13, 15, 26, 0.78)',
         padding: { x: 10, y: 4 },
       })
-      .setOrigin(0.5);
-
-    container.add([shadow, body, initialText, tag]);
-    this.container = container;
+      .setOrigin(0.5)
+      .setDepth(20);
   }
 
   setTarget(x: number, y: number): void {
@@ -61,14 +45,31 @@ export class RemotePlayer {
     this.targetY = y;
   }
 
-  /** Call from scene.update(). Smoothly approaches the latest server position. */
+  setSpeaking(speaking: boolean): void {
+    this.sprite.setSpeaking(speaking);
+  }
+
   tick(): void {
-    const c = this.container;
-    c.x += (this.targetX - c.x) * RemotePlayer.LERP;
-    c.y += (this.targetY - c.y) * RemotePlayer.LERP;
+    const c = this.sprite.container;
+    const dx = (this.targetX - c.x) * RemotePlayer.LERP;
+    const dy = (this.targetY - c.y) * RemotePlayer.LERP;
+    c.x += dx;
+    c.y += dy;
+
+    // Movement-driven animation.
+    const moved = Math.abs(c.x - this.lastX) + Math.abs(c.y - this.lastY);
+    this.sprite.setMoving(moved > 0.4);
+    if (Math.abs(c.x - this.lastX) > 0.05) {
+      this.sprite.setFacing(c.x - this.lastX);
+    }
+    this.lastX = c.x;
+    this.lastY = c.y;
+
+    this.nameTag.setPosition(c.x, c.y - 38);
   }
 
   destroy(): void {
-    this.container.destroy();
+    this.sprite.destroy();
+    this.nameTag.destroy();
   }
 }

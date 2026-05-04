@@ -3,12 +3,18 @@ import type { PlayerProfile } from '../PhaserGame';
 import { NetworkManager } from '../net/NetworkManager';
 import { RemotePlayer } from '../net/RemotePlayer';
 import { RoomRenderer } from '../world/RoomRenderer';
+import { VoiceManager } from '../voice/VoiceManager';
+import { computeGain } from '../voice/audibility';
+import { registerVoiceManager } from '../voice/voiceBridge';
+import { AvatarSprite } from '../avatars/AvatarSprite';
+import { getAvatarStyle } from '../../shared/avatars';
 import { ROOMS, RoomId, isBlocked, zoneAt, ZONE_NAMES } from '../../shared/world-helpers';
 
 const WALK_SPEED = 220;
 const AVATAR_RADIUS = 20;
 const SEND_INTERVAL_MS = 50;
 const MOVE_EPSILON = 0.5;
+const AUDIBILITY_TICK_MS = 200;
 
 interface WASDKeys {
   W: Phaser.Input.Keyboard.Key;
@@ -21,6 +27,7 @@ interface RemotePlayerData {
   uid: string;
   displayName: string;
   photoURL: string;
+  avatarId: string;
   room: string;
   zone: string;
   x: number;
@@ -28,13 +35,16 @@ interface RemotePlayerData {
 }
 
 export default class WorldScene extends Phaser.Scene {
-  private avatar!: Phaser.GameObjects.Container;
+  private avatarSprite!: AvatarSprite;
+  private nameTag!: Phaser.GameObjects.Text;
   private avatarX = 0;
   private avatarY = 0;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd!: WASDKeys;
 
   private network = new NetworkManager();
+  private voice = new VoiceManager();
+
   private remotes = new Map<string, RemotePlayer>();
   private remoteData = new Map<string, RemotePlayerData>();
 
@@ -44,6 +54,7 @@ export default class WorldScene extends Phaser.Scene {
   private lastSendAt = 0;
   private lastSentX = -Infinity;
   private lastSentY = -Infinity;
+  private lastAudibilityAt = 0;
 
   private hudRoomLabel?: Phaser.GameObjects.Text;
   private hudZoneLabel?: Phaser.GameObjects.Text;
@@ -57,16 +68,33 @@ export default class WorldScene extends Phaser.Scene {
     const profile = this.registry.get('profile') as PlayerProfile;
     const idToken = this.registry.get('idToken') as string | undefined;
     const serverUrl = import.meta.env.VITE_GAME_SERVER_URL as string | undefined;
+    const httpServerUrl = import.meta.env.VITE_HTTP_SERVER_URL as string | undefined;
 
     this.renderRoom(this.currentRoom);
 
     const spawn = ROOMS[this.currentRoom];
-    this.avatar = this.makeAvatar(spawn.spawnX, spawn.spawnY, profile);
     this.avatarX = spawn.spawnX;
     this.avatarY = spawn.spawnY;
 
+    this.avatarSprite = new AvatarSprite(
+      this, spawn.spawnX, spawn.spawnY,
+      getAvatarStyle(profile.avatarId)
+    );
+    this.avatarSprite.container.setDepth(10);
+
+    this.nameTag = this.add
+      .text(spawn.spawnX, spawn.spawnY - 38, profile.displayName, {
+        fontFamily: '"General Sans", system-ui, sans-serif',
+        fontSize: '13px',
+        color: '#f3eee6',
+        backgroundColor: 'rgba(13, 15, 26, 0.78)',
+        padding: { x: 10, y: 4 },
+      })
+      .setOrigin(0.5)
+      .setDepth(20);
+
     this.updateCameraBounds();
-    this.cameras.main.startFollow(this.avatar, true, 0.12, 0.12);
+    this.cameras.main.startFollow(this.avatarSprite.container, true, 0.12, 0.12);
     this.cameras.main.setZoom(1.25);
 
     this.cursors = this.input.keyboard!.createCursorKeys();
@@ -83,6 +111,7 @@ export default class WorldScene extends Phaser.Scene {
       .connect({
         serverUrl,
         idToken,
+        avatarId: profile.avatarId,
         handlers: {
           onPlayerAdd: (sid, p) => this.handlePlayerAdd(sid, p as RemotePlayerData),
           onPlayerRemove: (sid) => this.handlePlayerRemove(sid),
@@ -93,6 +122,38 @@ export default class WorldScene extends Phaser.Scene {
         },
       })
       .catch((err) => console.error('[net] connect failed:', err));
+
+    if (httpServerUrl) {
+      this.connectVoice(httpServerUrl, idToken);
+    }
+  }
+
+  private async connectVoice(httpServerUrl: string, idToken: string): Promise<void> {
+    try {
+      const resp = await fetch(`${httpServerUrl}/livekit-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: idToken }),
+      });
+      if (!resp.ok) {
+        throw new Error(`token ${resp.status}: ${await resp.text()}`);
+      }
+      const data = (await resp.json()) as { token: string; url: string };
+      if (!data.url) throw new Error('LIVEKIT_URL not configured on server');
+      await this.voice.connect({
+        serverUrl: data.url,
+        token: data.token,
+        handlers: {
+          onSpeakingChange: (uid, speaking) => this.handleSpeakingChange(uid, speaking),
+          onError: (msg) => this.showBanner(`voice: ${msg}`),
+        },
+      });
+      registerVoiceManager(this.voice);
+      window.dispatchEvent(new CustomEvent('lumen:voice-ready'));
+    } catch (err) {
+      console.error('[voice] connect failed:', err);
+      this.showBanner(`voice unavailable: ${(err as Error).message}`);
+    }
   }
 
   private renderRoom(roomId: RoomId): void {
@@ -106,88 +167,39 @@ export default class WorldScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, r.width, r.height);
   }
 
-  private makeAvatar(
-    x: number, y: number, profile: PlayerProfile
-  ): Phaser.GameObjects.Container {
-    const container = this.add.container(x, y);
-
-    const shadow = this.add.ellipse(0, 24, 46, 14, 0x000000, 0.32);
-    const body = this.add.circle(0, 0, AVATAR_RADIUS + 2, 0xe8a07f);
-    body.setStrokeStyle(2, 0xfff4ec, 0.95);
-
-    const initial = profile.displayName?.[0]?.toUpperCase() ?? '?';
-    const initialText = this.add
-      .text(0, 1, initial, {
-        fontFamily: '"General Sans", system-ui, sans-serif',
-        fontSize: '20px',
-        fontStyle: 'bold',
-        color: '#3a1a08',
-      })
-      .setOrigin(0.5);
-
-    const tag = this.add
-      .text(0, -38, profile.displayName, {
-        fontFamily: '"General Sans", system-ui, sans-serif',
-        fontSize: '13px',
-        color: '#f3eee6',
-        backgroundColor: 'rgba(13, 15, 26, 0.78)',
-        padding: { x: 10, y: 4 },
-      })
-      .setOrigin(0.5);
-
-    container.add([shadow, body, initialText, tag]);
-    container.setDepth(10);
-    return container;
-  }
-
   private makeRoomHud(): void {
     const r = ROOMS[this.currentRoom];
     this.hudRoomLabel = this.add
       .text(this.scale.width / 2, 28, r.name.toUpperCase(), {
-        fontFamily: '"Fraunces", serif',
-        fontStyle: 'italic',
-        fontSize: '14px',
-        color: '#f3eee6',
+        fontFamily: '"Fraunces", serif', fontStyle: 'italic',
+        fontSize: '14px', color: '#f3eee6',
       })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(1000)
-      .setAlpha(0.7);
+      .setOrigin(0.5).setScrollFactor(0).setDepth(1000).setAlpha(0.7);
 
     this.hudZoneLabel = this.add
       .text(this.scale.width / 2, 50, '', {
         fontFamily: '"General Sans", system-ui, sans-serif',
-        fontSize: '11px',
-        color: '#a09a8e',
+        fontSize: '11px', color: '#a09a8e',
       })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(1000);
+      .setOrigin(0.5).setScrollFactor(0).setDepth(1000);
   }
-
-  // --- Network handlers ---
 
   private handlePlayerAdd(sessionId: string, p: RemotePlayerData): void {
     this.remoteData.set(sessionId, p);
-    if (sessionId === this.network.sessionId) {
-      // Don't render our own; we have the local avatar.
-      return;
-    }
-    if (p.room !== this.currentRoom) {
-      // Player exists but isn't in our current room — don't render.
-      return;
-    }
-    const remote = new RemotePlayer(this, p.x, p.y, p.displayName);
-    this.remotes.set(sessionId, remote);
+    if (sessionId === this.network.sessionId) return;
+    if (p.room !== this.currentRoom) return;
+    this.remotes.set(
+      sessionId,
+      new RemotePlayer(this, p.x, p.y, p.displayName, p.avatarId)
+    );
   }
 
   private handlePlayerRemove(sessionId: string): void {
+    const data = this.remoteData.get(sessionId);
+    if (data) this.voice.setAudibility(data.uid, 0);
     this.remoteData.delete(sessionId);
     const remote = this.remotes.get(sessionId);
-    if (remote) {
-      remote.destroy();
-      this.remotes.delete(sessionId);
-    }
+    if (remote) { remote.destroy(); this.remotes.delete(sessionId); }
   }
 
   private handleRemoteMove(sessionId: string, x: number, y: number): void {
@@ -200,61 +212,52 @@ export default class WorldScene extends Phaser.Scene {
   private handleRemoteRoomChange(sessionId: string, newRoom: RoomId): void {
     const data = this.remoteData.get(sessionId);
     if (data) data.room = newRoom;
-
     const existing = this.remotes.get(sessionId);
-    if (newRoom === this.currentRoom) {
-      // Just entered our room — render them.
-      if (!existing && data) {
-        const remote = new RemotePlayer(this, data.x, data.y, data.displayName);
-        this.remotes.set(sessionId, remote);
-      }
-    } else {
-      // Left our room — remove visual.
-      if (existing) {
-        existing.destroy();
-        this.remotes.delete(sessionId);
-      }
+    if (newRoom === this.currentRoom && !existing && data) {
+      this.remotes.set(
+        sessionId,
+        new RemotePlayer(this, data.x, data.y, data.displayName, data.avatarId)
+      );
+    } else if (newRoom !== this.currentRoom && existing) {
+      if (data) this.voice.setAudibility(data.uid, 0);
+      existing.destroy();
+      this.remotes.delete(sessionId);
     }
   }
 
   private handleSelfRoomChange(newRoom: RoomId, x: number, y: number): void {
     if (newRoom === this.currentRoom) {
-      // Same room, just snap position (e.g. server correction).
-      this.avatar.setPosition(x, y);
-      this.avatarX = x;
-      this.avatarY = y;
+      this.avatarSprite.container.setPosition(x, y);
+      this.avatarX = x; this.avatarY = y;
       return;
     }
-
-    // Full room transition.
     this.currentRoom = newRoom;
-    this.avatar.setPosition(x, y);
-    this.avatarX = x;
-    this.avatarY = y;
-
-    // Re-render world.
+    this.avatarSprite.container.setPosition(x, y);
+    this.avatarX = x; this.avatarY = y;
     this.renderRoom(newRoom);
     this.updateCameraBounds();
 
-    // Update HUD label.
     if (this.hudRoomLabel) {
       this.hudRoomLabel.setText(ROOMS[newRoom].name.toUpperCase());
-      this.tweens.add({
-        targets: this.hudRoomLabel,
-        alpha: { from: 0, to: 0.7 },
-        duration: 600,
-      });
+      this.tweens.add({ targets: this.hudRoomLabel, alpha: { from: 0, to: 0.7 }, duration: 600 });
     }
 
-    // Rebuild remote players to match new room.
-    for (const [sid, remote] of this.remotes) {
-      remote.destroy();
-      this.remotes.delete(sid);
-    }
+    for (const [sid, remote] of this.remotes) { remote.destroy(); this.remotes.delete(sid); }
     for (const [sid, data] of this.remoteData) {
       if (sid === this.network.sessionId) continue;
       if (data.room !== newRoom) continue;
-      this.remotes.set(sid, new RemotePlayer(this, data.x, data.y, data.displayName));
+      this.remotes.set(
+        sid,
+        new RemotePlayer(this, data.x, data.y, data.displayName, data.avatarId)
+      );
+    }
+  }
+
+  private handleSpeakingChange(uid: string, speaking: boolean): void {
+    for (const [sid, data] of this.remoteData) {
+      if (data.uid !== uid) continue;
+      this.remotes.get(sid)?.setSpeaking(speaking);
+      break;
     }
   }
 
@@ -262,41 +265,25 @@ export default class WorldScene extends Phaser.Scene {
     const banner = this.add
       .text(this.scale.width / 2, 90, message, {
         fontFamily: '"General Sans", system-ui, sans-serif',
-        fontSize: '14px',
-        color: '#f0856b',
+        fontSize: '14px', color: '#f0856b',
         backgroundColor: 'rgba(13, 15, 26, 0.92)',
         padding: { x: 14, y: 8 },
       })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(1000);
-
+      .setOrigin(0.5).setScrollFactor(0).setDepth(1000);
     this.tweens.add({
-      targets: banner,
-      alpha: 0,
-      delay: 6000,
-      duration: 800,
+      targets: banner, alpha: 0, delay: 6000, duration: 800,
       onComplete: () => banner.destroy(),
     });
   }
 
   update(time: number, delta: number) {
-    let vx = 0;
-    let vy = 0;
-
+    let vx = 0, vy = 0;
     if (this.cursors.left.isDown || this.wasd.A.isDown) vx -= 1;
     if (this.cursors.right.isDown || this.wasd.D.isDown) vx += 1;
     if (this.cursors.up.isDown || this.wasd.W.isDown) vy -= 1;
     if (this.cursors.down.isDown || this.wasd.S.isDown) vy += 1;
+    if (vx !== 0 && vy !== 0) { const inv = 1 / Math.SQRT2; vx *= inv; vy *= inv; }
 
-    if (vx !== 0 && vy !== 0) {
-      const inv = 1 / Math.SQRT2;
-      vx *= inv;
-      vy *= inv;
-    }
-
-    // Client-side collision prediction. Move axis-by-axis so sliding along
-    // walls feels natural instead of binary stop.
     const step = (delta / 1000) * WALK_SPEED;
     let nextX = this.avatarX + vx * step;
     let nextY = this.avatarY + vy * step;
@@ -304,20 +291,19 @@ export default class WorldScene extends Phaser.Scene {
     const room = ROOMS[this.currentRoom];
     nextX = Math.max(AVATAR_RADIUS, Math.min(room.width - AVATAR_RADIUS, nextX));
     nextY = Math.max(AVATAR_RADIUS, Math.min(room.height - AVATAR_RADIUS, nextY));
+    if (!isBlocked(this.currentRoom, nextX, this.avatarY, AVATAR_RADIUS)) this.avatarX = nextX;
+    if (!isBlocked(this.currentRoom, this.avatarX, nextY, AVATAR_RADIUS)) this.avatarY = nextY;
 
-    if (!isBlocked(this.currentRoom, nextX, this.avatarY, AVATAR_RADIUS)) {
-      this.avatarX = nextX;
-    }
-    if (!isBlocked(this.currentRoom, this.avatarX, nextY, AVATAR_RADIUS)) {
-      this.avatarY = nextY;
-    }
+    this.avatarSprite.container.setPosition(this.avatarX, this.avatarY);
+    this.nameTag.setPosition(this.avatarX, this.avatarY - 38);
 
-    this.avatar.setPosition(this.avatarX, this.avatarY);
+    // Drive local sprite animation off intent.
+    const moving = vx !== 0 || vy !== 0;
+    this.avatarSprite.setMoving(moving);
+    if (vx !== 0) this.avatarSprite.setFacing(vx);
 
-    // Tick remote interpolation.
     this.remotes.forEach((r) => r.tick());
 
-    // Update zone HUD.
     const z = zoneAt(this.currentRoom, this.avatarX, this.avatarY);
     if (z !== this.currentZone) {
       this.currentZone = z ?? '';
@@ -327,24 +313,37 @@ export default class WorldScene extends Phaser.Scene {
       }
     }
 
-    // Throttled position broadcast.
     if (time - this.lastSendAt >= SEND_INTERVAL_MS) {
       const dx = Math.abs(this.avatarX - this.lastSentX);
       const dy = Math.abs(this.avatarY - this.lastSentY);
       if (dx > MOVE_EPSILON || dy > MOVE_EPSILON) {
         this.network.sendMove(this.avatarX, this.avatarY);
-        this.lastSentX = this.avatarX;
-        this.lastSentY = this.avatarY;
+        this.lastSentX = this.avatarX; this.lastSentY = this.avatarY;
         this.lastSendAt = time;
+      }
+    }
+
+    if (time - this.lastAudibilityAt >= AUDIBILITY_TICK_MS) {
+      this.lastAudibilityAt = time;
+      if (this.voice.isConnected()) {
+        const self = { room: this.currentRoom, x: this.avatarX, y: this.avatarY };
+        for (const [sid, peer] of this.remoteData) {
+          if (sid === this.network.sessionId) continue;
+          this.voice.setAudibility(peer.uid, computeGain(self, peer));
+        }
       }
     }
   }
 
   shutdown() {
     this.network.disconnect();
+    this.voice.disconnect();
+    registerVoiceManager(null);
     this.remotes.forEach((r) => r.destroy());
     this.remotes.clear();
     this.remoteData.clear();
     this.roomRenderer?.destroy();
+    this.avatarSprite?.destroy();
+    this.nameTag?.destroy();
   }
 }

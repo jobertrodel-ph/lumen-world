@@ -4,6 +4,7 @@ export interface RemotePlayerState {
   uid: string;
   displayName: string;
   photoURL: string;
+  avatarId: string;
   room: string;
   zone: string;
   x: number;
@@ -22,6 +23,7 @@ export interface NetworkHandlers {
 interface JoinOptions {
   serverUrl: string;
   idToken: string;
+  avatarId: string;
   handlers: NetworkHandlers;
 }
 
@@ -34,12 +36,12 @@ export class NetworkManager {
     return this.room?.sessionId ?? null;
   }
 
-  async connect({ serverUrl, idToken, handlers }: JoinOptions): Promise<void> {
+  async connect({ serverUrl, idToken, avatarId, handlers }: JoinOptions): Promise<void> {
     this.handlers = handlers;
     this.client = new Client(serverUrl);
 
     try {
-      this.room = await this.client.joinOrCreate('world', { token: idToken });
+      this.room = await this.client.joinOrCreate('world', { token: idToken, avatarId });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to join world';
       handlers.onError(msg);
@@ -54,9 +56,8 @@ export class NetworkManager {
     this.room?.send('move', { x, y });
   }
 
-  /** Optional debug/menu helper. */
-  requestTeleport(roomId: string): void {
-    this.room?.send('teleport', { room: roomId });
+  setAvatar(avatarId: string): void {
+    this.room?.send('setAvatar', { avatarId });
   }
 
   disconnect(): void {
@@ -84,21 +85,19 @@ export class NetworkManager {
         uid: player.uid,
         displayName: player.displayName,
         photoURL: player.photoURL,
+        avatarId: player.avatarId,
         room: player.room,
         zone: player.zone,
         x: player.x,
         y: player.y,
       });
 
-      // Position listeners.
       $(player).listen('x', (value: number) => {
         handlers.onPlayerMove(sessionId, value, player.y);
       });
       $(player).listen('y', (value: number) => {
         handlers.onPlayerMove(sessionId, player.x, value);
       });
-
-      // Room-change listener — fires both for self and others.
       $(player).listen('room', (newRoom: string) => {
         if (sessionId === ownSessionId) {
           handlers.onSelfRoomChange(newRoom, player.x, player.y);

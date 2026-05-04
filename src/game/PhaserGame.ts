@@ -6,6 +6,7 @@ export interface PlayerProfile {
   uid: string;
   displayName: string;
   photoURL?: string;
+  avatarId: string;
 }
 
 let game: Phaser.Game | null = null;
