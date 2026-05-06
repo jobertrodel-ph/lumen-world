@@ -5,10 +5,13 @@ import { toggleMic } from '../game/voice/voiceBridge';
 import { TouchJoystick } from './TouchJoystick';
 import { RotateHint } from './RotateHint';
 import { useViewport } from './useViewport';
+import { ChatPanel, type ChatPanelHandle } from './chat/ChatPanel';
+import { useChatKeyboard } from './chat/useChatKeyboard';
 
 export default function GameContainer({ avatarId }: { avatarId: string }) {
   const { user, logout } = useAuth();
   const mountRef = useRef<HTMLDivElement>(null);
+  const chatPanelRef = useRef<ChatPanelHandle>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [voiceReady, setVoiceReady] = useState(false);
   const [micOn, setMicOn] = useState(false);
@@ -17,6 +20,9 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
   const { isTouch, isSmall, isPortrait } = useViewport();
   const showJoystick = isTouch && isSmall;
   const showRotateHint = isTouch && isSmall && isPortrait;
+
+  // Wire Enter key behavior to chat panel.
+  useChatKeyboard(chatPanelRef);
 
   useEffect(() => {
     const node = mountRef.current;
@@ -46,14 +52,10 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
     return () => {
       cancelled = true;
       window.removeEventListener('lumen:voice-ready', onVoiceReady);
-
-      // Reset HUD state so signing back in starts clean. Without this,
-      // the next mount sees stale "voice ready" / "mic on" flags.
       setVoiceReady(false);
       setMicOn(false);
       setMicBusy(false);
       setBootError(null);
-
       destroyGame();
     };
   }, [user, avatarId]);
@@ -111,12 +113,16 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
       {!showJoystick && (
         <div className="hud-controls">
           <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
-          <span>or arrow keys to move · walk close to hear</span>
+          <span>to move · </span>
+          <kbd>Enter</kbd>
+          <span>to chat · walk close to hear</span>
         </div>
       )}
 
       {showJoystick && <TouchJoystick />}
       {showRotateHint && <RotateHint />}
+
+      <ChatPanel ref={chatPanelRef} />
     </div>
   );
 }

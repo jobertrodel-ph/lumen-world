@@ -8,8 +8,10 @@ import { computeGain } from '../voice/audibility';
 import { registerVoiceManager } from '../voice/voiceBridge';
 import { AvatarSprite } from '../avatars/AvatarSprite';
 import { getAvatarStyle } from '../../shared/avatars';
-import { ROOMS, RoomId, isBlocked, zoneAt, ZONE_NAMES } from '../../shared/world-helpers';
+import { ROOMS, RoomId, isBlocked, ZONE_NAMES } from '../../shared/world-helpers';
 import { readJoystick } from '../input/inputBridge';
+import { registerChatActions, setLocation, setMessages } from '../chat/chatBridge';
+import type { ChatMessage } from '../chat/types';
 
 const WALK_SPEED = 220;
 const AVATAR_RADIUS = 20;
@@ -106,6 +108,9 @@ export default class WorldScene extends Phaser.Scene {
 
     this.makeRoomHud();
 
+    // Initial bridge state.
+    setLocation(this.currentRoom, this.currentZone);
+
     if (!serverUrl || !idToken) {
       this.showBanner(!serverUrl ? 'Set VITE_GAME_SERVER_URL.' : 'Missing auth token.');
       return;
@@ -122,8 +127,19 @@ export default class WorldScene extends Phaser.Scene {
           onPlayerMove: (sid, x, y) => this.handleRemoteMove(sid, x, y),
           onPlayerRoomChange: (sid, room) => this.handleRemoteRoomChange(sid, room as RoomId),
           onSelfRoomChange: (room, x, y) => this.handleSelfRoomChange(room as RoomId, x, y),
+          onSelfZoneChange: (zone) => this.handleSelfZoneChange(zone),
+          onChatChanged: (messages: ChatMessage[]) => setMessages(messages),
           onError: (msg) => this.showBanner(msg),
         },
+      })
+      .then(() => {
+        if (this.destroyed) return;
+        // Register chat send/react/bump now that we're connected.
+        registerChatActions({
+          send: (text, scope, opts) => this.network.sendChat(text, scope, opts),
+          react: (id, emoji) => this.network.reactChat(id, emoji),
+          bump: (id) => this.network.bumpChat(id),
+        });
       })
       .catch((err) => console.error('[net] connect failed:', err));
 
@@ -218,7 +234,7 @@ export default class WorldScene extends Phaser.Scene {
     });
   }
 
-  // --- Network handlers (with destroyed guards) ---
+  // --- Network handlers ---
 
   private handlePlayerAdd(sessionId: string, p: RemotePlayerData): void {
     if (this.destroyed || !this.sys.isActive()) return;
@@ -278,6 +294,7 @@ export default class WorldScene extends Phaser.Scene {
     this.renderRoom(newRoom);
     this.updateCameraBounds();
     this.updateRoomHud(newRoom);
+    setLocation(newRoom, this.currentZone);
 
     for (const [sid, remote] of this.remotes) { remote.destroy(); this.remotes.delete(sid); }
     for (const [sid, data] of this.remoteData) {
@@ -287,6 +304,16 @@ export default class WorldScene extends Phaser.Scene {
         sid,
         new RemotePlayer(this, data.x, data.y, data.displayName, data.avatarId)
       );
+    }
+  }
+
+  private handleSelfZoneChange(zone: string): void {
+    if (this.destroyed) return;
+    this.currentZone = zone;
+    setLocation(this.currentRoom, zone);
+    if (this.hudZoneLabel) {
+      const name = zone ? ZONE_NAMES[zone] ?? '' : '';
+      this.hudZoneLabel.setText(name ? `· ${name} ·` : '');
     }
   }
 
@@ -315,14 +342,33 @@ export default class WorldScene extends Phaser.Scene {
     });
   }
 
+  /**
+   * Returns true if movement input should be suppressed because the user
+   * is typing somewhere (chat input or any other text field).
+   */
+  private isTyping(): boolean {
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = active.tagName;
+    return (
+      tag === 'INPUT' ||
+      tag === 'TEXTAREA' ||
+      (active as HTMLElement).isContentEditable
+    );
+  }
+
   update(time: number, delta: number) {
     if (this.destroyed) return;
 
     let vx = 0, vy = 0;
-    if (this.cursors.left.isDown || this.wasd.A.isDown) vx -= 1;
-    if (this.cursors.right.isDown || this.wasd.D.isDown) vx += 1;
-    if (this.cursors.up.isDown || this.wasd.W.isDown) vy -= 1;
-    if (this.cursors.down.isDown || this.wasd.S.isDown) vy += 1;
+    const typing = this.isTyping();
+
+    if (!typing) {
+      if (this.cursors.left.isDown || this.wasd.A.isDown) vx -= 1;
+      if (this.cursors.right.isDown || this.wasd.D.isDown) vx += 1;
+      if (this.cursors.up.isDown || this.wasd.W.isDown) vy -= 1;
+      if (this.cursors.down.isDown || this.wasd.S.isDown) vy += 1;
+    }
 
     if (vx === 0 && vy === 0) {
       const j = readJoystick();
@@ -353,15 +399,6 @@ export default class WorldScene extends Phaser.Scene {
 
     this.remotes.forEach((r) => r.tick());
 
-    const z = zoneAt(this.currentRoom, this.avatarX, this.avatarY);
-    if (z !== this.currentZone) {
-      this.currentZone = z ?? '';
-      if (this.hudZoneLabel) {
-        const name = z ? ZONE_NAMES[z] ?? '' : '';
-        this.hudZoneLabel.setText(name ? `· ${name} ·` : '');
-      }
-    }
-
     if (time - this.lastSendAt >= SEND_INTERVAL_MS) {
       const dx = Math.abs(this.avatarX - this.lastSentX);
       const dy = Math.abs(this.avatarY - this.lastSentY);
@@ -386,6 +423,7 @@ export default class WorldScene extends Phaser.Scene {
 
   shutdown() {
     this.destroyed = true;
+    registerChatActions(null);
     this.network.disconnect();
     this.voice.disconnect();
     registerVoiceManager(null);

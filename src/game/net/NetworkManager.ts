@@ -1,4 +1,5 @@
 import { Client, Room, getStateCallbacks } from 'colyseus.js';
+import type { ChatMessage } from '../chat/types';
 
 export interface RemotePlayerState {
   uid: string;
@@ -17,6 +18,8 @@ export interface NetworkHandlers {
   onPlayerMove: (sessionId: string, x: number, y: number) => void;
   onPlayerRoomChange: (sessionId: string, room: string) => void;
   onSelfRoomChange: (room: string, x: number, y: number) => void;
+  onSelfZoneChange: (zone: string) => void;
+  onChatChanged: (messages: ChatMessage[]) => void;
   onError: (message: string) => void;
 }
 
@@ -25,6 +28,11 @@ interface JoinOptions {
   idToken: string;
   avatarId: string;
   handlers: NetworkHandlers;
+}
+
+interface SendChatOptions {
+  replyToId?: string;
+  quoteOfId?: string;
 }
 
 export class NetworkManager {
@@ -50,6 +58,8 @@ export class NetworkManager {
 
     await this.waitForFirstSync();
     this.bindRoomEvents();
+    // Push initial chat snapshot to client.
+    handlers.onChatChanged(this.snapshotChat());
   }
 
   sendMove(x: number, y: number): void {
@@ -58,6 +68,25 @@ export class NetworkManager {
 
   setAvatar(avatarId: string): void {
     this.room?.send('setAvatar', { avatarId });
+  }
+
+  // --- chat ---
+
+  sendChat(text: string, scope: string, options?: SendChatOptions): void {
+    this.room?.send('chat:send', {
+      text,
+      scope,
+      replyToId: options?.replyToId,
+      quoteOfId: options?.quoteOfId,
+    });
+  }
+
+  reactChat(messageId: string, emoji: string): void {
+    this.room?.send('chat:react', { messageId, emoji });
+  }
+
+  bumpChat(messageId: string): void {
+    this.room?.send('chat:bump', { messageId });
   }
 
   disconnect(): void {
@@ -72,6 +101,37 @@ export class NetworkManager {
       if (!this.room) return resolve();
       this.room.onStateChange.once(() => resolve());
     });
+  }
+
+  /**
+   * Convert the live ArraySchema of chat messages into plain JS objects
+   * the React layer can consume.
+   */
+  private snapshotChat(): ChatMessage[] {
+    if (!this.room) return [];
+    const out: ChatMessage[] = [];
+    for (const m of this.room.state.chat) {
+      out.push({
+        id: m.id,
+        kind: m.kind,
+        scope: m.scope,
+        senderUid: m.senderUid,
+        senderName: m.senderName,
+        senderAvatarId: m.senderAvatarId,
+        text: m.text,
+        timestamp: m.timestamp,
+        replyToId: m.replyToId,
+        quoteText: m.quoteText,
+        quoteSenderName: m.quoteSenderName,
+        quoteTimestamp: m.quoteTimestamp,
+        bumpedFromId: m.bumpedFromId,
+        reactions: m.reactions.map((r: { emoji: string; users: string[] }) => ({
+          emoji: r.emoji,
+          users: [...r.users],
+        })),
+      });
+    }
+    return out;
   }
 
   private bindRoomEvents(): void {
@@ -105,11 +165,34 @@ export class NetworkManager {
           handlers.onPlayerRoomChange(sessionId, newRoom);
         }
       });
+      // Track our own zone changes for chat scope.
+      if (sessionId === ownSessionId) {
+        $(player).listen('zone', (newZone: string) => {
+          handlers.onSelfZoneChange(newZone);
+        });
+      }
     });
 
     $(this.room.state).players.onRemove((_player: unknown, sessionId: string) => {
       handlers.onPlayerRemove(sessionId);
     });
+
+    // Chat — re-snapshot whenever the array or any nested message field changes.
+    // Cheap because it's bounded to 50 entries.
+    const refreshChat = () => handlers.onChatChanged(this.snapshotChat());
+
+    $(this.room.state).chat.onAdd((msg: any) => {
+      refreshChat();
+      // Also listen for in-place changes on this specific message.
+      $(msg).listen('text', refreshChat);
+      $(msg).reactions.onAdd((reaction: any) => {
+        refreshChat();
+        $(reaction).users.onAdd(refreshChat);
+        $(reaction).users.onRemove(refreshChat);
+      });
+      $(msg).reactions.onRemove(refreshChat);
+    });
+    $(this.room.state).chat.onRemove(refreshChat);
 
     this.room.onError((code, message) => {
       handlers.onError(`Room error ${code}: ${message ?? 'unknown'}`);
