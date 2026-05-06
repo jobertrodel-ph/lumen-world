@@ -1,16 +1,6 @@
 import Phaser from 'phaser';
 import { AvatarStyle } from '../../shared/avatars';
 
-/**
- * AvatarSprite renders a small humanoid character from an AvatarStyle spec.
- * Composed of layered shapes (no bitmaps): shadow, body block, head, hair,
- * face details, accent. Has idle breathing and walk bob animations.
- *
- * Faces "down" by default; faces left/right via flipping. No back-facing
- * animation for now — modern Gather-style games typically only show 3
- * facing directions (down, left, right) and look great.
- */
-
 const HEAD_RADIUS = 14;
 const BODY_WIDTH = 26;
 const BODY_HEIGHT = 22;
@@ -31,61 +21,73 @@ export class AvatarSprite {
   constructor(scene: Phaser.Scene, x: number, y: number, style: AvatarStyle) {
     this.container = scene.add.container(x, y);
 
-    // --- Shadow ---
     const shadow = scene.add.ellipse(0, 22, SHADOW_W, SHADOW_H, 0x000000, 0.32);
 
-    // --- Speaking ring (hidden by default) ---
-    this.speakingRing = scene.add.circle(0, -4, 28, 0xfff4ec, 0);
-    this.speakingRing.setStrokeStyle(3, 0xfff4ec, 0);
+    // Qi pulse — soft gold ring (not white). Hidden until speaking.
+    this.speakingRing = scene.add.circle(0, -4, 30, 0xe8b870, 0);
+    this.speakingRing.setStrokeStyle(3, 0xe8b870, 0);
 
     // --- Body group ---
     this.bodyGroup = scene.add.container(0, 6);
 
-    // Outfit block — slightly tapered shape using a polygon for shoulders.
     const outfit = scene.add.graphics();
     outfit.fillStyle(style.outfitColor, 1);
-    // Shoulders narrower, waist a touch wider.
     outfit.fillRoundedRect(-BODY_WIDTH / 2, -2, BODY_WIDTH, BODY_HEIGHT, {
       tl: 8, tr: 8, bl: 4, br: 4,
     });
-    // Arm hints — small darker blocks at shoulders.
+    // Lapel / collar detail using outfitSecondary.
+    outfit.fillStyle(style.outfitSecondary, 1);
+    outfit.fillTriangle(-6, -2, 0, 6, 6, -2);   // V-neck / lapel
+    // Arm hints.
     outfit.fillStyle(this.darken(style.outfitColor, 0.85), 1);
     outfit.fillRoundedRect(-BODY_WIDTH / 2 - 3, 0, 6, 14, 3);
     outfit.fillRoundedRect(BODY_WIDTH / 2 - 3, 0, 6, 14, 3);
     this.bodyGroup.add(outfit);
 
-    // Collar accent (simple horizontal stripe)
-    if (style.accentType === 'collar' && style.accentColor) {
-      const collar = scene.add.rectangle(0, -1, BODY_WIDTH - 4, 3, style.accentColor, 0.9);
-      this.bodyGroup.add(collar);
+    // Sash accent — diagonal across the chest.
+    if (style.accentType === 'sash' && style.accentColor) {
+      const sash = scene.add.graphics();
+      sash.fillStyle(style.accentColor, 0.95);
+      sash.fillTriangle(-12, 4, -10, 0, 12, 14);
+      sash.fillTriangle(-12, 4, 12, 14, 14, 16);
+      this.bodyGroup.add(sash);
     }
 
-    // Scarf accent (loose wrap with a hanging end)
+    // Pendant — small drop on a thin chain.
+    if (style.accentType === 'pendant' && style.accentColor) {
+      const chain = scene.add.graphics();
+      chain.lineStyle(0.6, 0xc9c4b8, 0.65);
+      chain.lineBetween(-3, -1, 0, 4);
+      chain.lineBetween(3, -1, 0, 4);
+      const pendant = scene.add.circle(0, 5, 2, style.accentColor, 1);
+      pendant.setStrokeStyle(0.6, this.darken(style.accentColor, 0.7), 0.8);
+      this.bodyGroup.add([chain, pendant]);
+    }
+
+    // Scarf — loose wrap with hanging end.
     if (style.accentType === 'scarf' && style.accentColor) {
       const scarfWrap = scene.add.graphics();
       scarfWrap.fillStyle(style.accentColor, 1);
       scarfWrap.fillRoundedRect(-12, -4, 24, 6, 3);
-      scarfWrap.fillRect(-4, 0, 5, 12); // hanging end
+      scarfWrap.fillRect(-4, 0, 5, 12);
       this.bodyGroup.add(scarfWrap);
     }
 
     // --- Head group ---
     this.headGroup = scene.add.container(0, -10);
 
-    // Head circle
     const head = scene.add.circle(0, 0, HEAD_RADIUS, style.bodyColor, 1);
     head.setStrokeStyle(1, this.darken(style.bodyColor, 0.85), 0.6);
     this.headGroup.add(head);
 
-    // Hair (drawn over the head)
     this.drawHair(scene, this.headGroup, style);
 
-    // Eyes — two tiny dots, expressive and minimal.
+    // Eyes.
     const eyeL = scene.add.circle(-4, 1, 1.4, 0x1a1a1a, 1);
     const eyeR = scene.add.circle(4, 1, 1.4, 0x1a1a1a, 1);
     this.headGroup.add([eyeL, eyeR]);
 
-    // Mouth — subtle curved line. Two small rectangles approximate a smile.
+    // Mouth.
     const mouth = scene.add.graphics();
     mouth.lineStyle(1.2, 0x1a1a1a, 0.7);
     mouth.beginPath();
@@ -94,7 +96,7 @@ export class AvatarSprite {
     mouth.strokePath();
     this.headGroup.add(mouth);
 
-    // Glasses
+    // Glasses.
     if (style.accentType === 'glasses' && style.accentColor) {
       const glasses = scene.add.graphics();
       glasses.lineStyle(1.5, style.accentColor, 0.95);
@@ -107,15 +109,24 @@ export class AvatarSprite {
       this.headGroup.add(glasses);
     }
 
-    // Earring (one dot at the right side of the head)
+    // Earring.
     if (style.accentType === 'earring' && style.accentColor) {
-      const earring = scene.add.circle(HEAD_RADIUS - 2, 4, 1.5, style.accentColor, 1);
+      // Small hoop on the right side.
+      const earring = scene.add.graphics();
+      earring.lineStyle(1.2, style.accentColor, 1);
+      earring.strokeCircle(HEAD_RADIUS - 2, 4, 2.2);
       this.headGroup.add(earring);
     }
 
-    this.container.add([shadow, this.speakingRing, this.bodyGroup, this.headGroup]);
+    // Special touch for `hao` — eye scar.
+    if (style.id === 'hao') {
+      const scar = scene.add.graphics();
+      scar.lineStyle(0.8, 0x6a3030, 0.8);
+      scar.lineBetween(-7, -3, -2, 5);
+      this.headGroup.add(scar);
+    }
 
-    // Start idle breathing.
+    this.container.add([shadow, this.speakingRing, this.bodyGroup, this.headGroup]);
     this.startIdle();
   }
 
@@ -124,61 +135,87 @@ export class AvatarSprite {
     parent: Phaser.GameObjects.Container,
     style: AvatarStyle
   ) {
-    if (style.hairStyle === 'bald' || !style.hairColor) return;
     const g = scene.add.graphics();
     g.fillStyle(style.hairColor, 1);
+    const skinColor = style.bodyColor;
 
     switch (style.hairStyle) {
-      case 'bob':
-        // Rounded cap covering the top half + sides.
-        g.fillRoundedRect(-HEAD_RADIUS - 1, -HEAD_RADIUS - 2, HEAD_RADIUS * 2 + 2, HEAD_RADIUS + 4, {
-          tl: 14, tr: 14, bl: 8, br: 8,
+      case 'sweep':
+        // Side-swept — fuller on one side, cleaner on the other.
+        g.fillRoundedRect(-HEAD_RADIUS - 1, -HEAD_RADIUS - 2, HEAD_RADIUS * 2 + 2, HEAD_RADIUS + 2, {
+          tl: 12, tr: 14, bl: 4, br: 4,
         });
-        // Trim the bottom by drawing the head color back over the lower part.
-        g.fillStyle(style.bodyColor, 1);
-        g.fillRect(-HEAD_RADIUS - 1, 2, HEAD_RADIUS * 2 + 2, HEAD_RADIUS);
-        break;
-      case 'long':
-        // Bob + long flowing strands on the sides.
-        g.fillRoundedRect(-HEAD_RADIUS - 1, -HEAD_RADIUS - 2, HEAD_RADIUS * 2 + 2, HEAD_RADIUS + 4, {
-          tl: 14, tr: 14, bl: 4, br: 4,
-        });
-        g.fillRoundedRect(-HEAD_RADIUS - 2, -2, 4, 14, 2);
-        g.fillRoundedRect(HEAD_RADIUS - 2, -2, 4, 14, 2);
-        g.fillStyle(style.bodyColor, 1);
-        g.fillRect(-HEAD_RADIUS + 2, 4, HEAD_RADIUS * 2 - 4, HEAD_RADIUS);
-        break;
-      case 'buzz':
-        // Subtle cap, very close to the head.
-        g.fillCircle(0, -2, HEAD_RADIUS - 1);
-        g.fillStyle(style.bodyColor, 1);
+        g.fillRect(-HEAD_RADIUS, -HEAD_RADIUS - 4, 12, 6); // peak
+        g.fillStyle(skinColor, 1);
         g.fillRect(-HEAD_RADIUS, 2, HEAD_RADIUS * 2, HEAD_RADIUS);
         break;
-      case 'tuft':
-        // Spiky top tuft.
-        g.fillRoundedRect(-HEAD_RADIUS, -HEAD_RADIUS - 2, HEAD_RADIUS * 2, HEAD_RADIUS - 2, {
+
+      case 'undercut':
+        // Sharp top, sides shaved (lighter line near temples).
+        g.fillRoundedRect(-HEAD_RADIUS, -HEAD_RADIUS - 2, HEAD_RADIUS * 2, 9, {
           tl: 10, tr: 10, bl: 0, br: 0,
         });
-        // Three small tufts pointing up.
-        g.fillTriangle(-7, -HEAD_RADIUS - 1, -3, -HEAD_RADIUS - 8, 0, -HEAD_RADIUS - 1);
-        g.fillTriangle(0, -HEAD_RADIUS - 1, 4, -HEAD_RADIUS - 9, 8, -HEAD_RADIUS - 1);
+        // Shaved sides — a thin band of slightly darker skin tone.
+        g.fillStyle(this.darken(skinColor, 0.93), 1);
+        g.fillRect(-HEAD_RADIUS, -3, HEAD_RADIUS * 2, 4);
+        g.fillStyle(skinColor, 1);
+        g.fillRect(-HEAD_RADIUS, 2, HEAD_RADIUS * 2, HEAD_RADIUS);
         break;
-      case 'wave':
-        // Wavy bob with subtle curl.
-        g.fillRoundedRect(-HEAD_RADIUS - 2, -HEAD_RADIUS - 2, HEAD_RADIUS * 2 + 4, HEAD_RADIUS + 4, {
-          tl: 16, tr: 14, bl: 8, br: 14,
+
+      case 'pony':
+        // Cap on top + tail behind.
+        g.fillRoundedRect(-HEAD_RADIUS, -HEAD_RADIUS - 2, HEAD_RADIUS * 2, HEAD_RADIUS + 2, {
+          tl: 12, tr: 12, bl: 6, br: 6,
         });
-        // Curl detail
-        g.fillCircle(HEAD_RADIUS - 1, 4, 4);
-        g.fillStyle(style.bodyColor, 1);
-        g.fillRect(-HEAD_RADIUS, 4, HEAD_RADIUS * 2, HEAD_RADIUS);
+        // Ponytail — a curved tail behind the head.
+        g.fillRoundedRect(-3, -2, 6, 12, 3);
+        g.fillStyle(skinColor, 1);
+        g.fillRect(-HEAD_RADIUS, 2, HEAD_RADIUS * 2, HEAD_RADIUS);
+        break;
+
+      case 'long-side':
+        // Long flowing hair on one side.
+        g.fillRoundedRect(-HEAD_RADIUS - 2, -HEAD_RADIUS - 2, HEAD_RADIUS * 2 + 4, HEAD_RADIUS + 4, {
+          tl: 14, tr: 16, bl: 6, br: 14,
+        });
+        // Long strand on the right going past shoulder.
+        g.fillRoundedRect(HEAD_RADIUS - 4, 2, 6, 18, 3);
+        g.fillStyle(skinColor, 1);
+        g.fillRect(-HEAD_RADIUS, 4, HEAD_RADIUS * 2 - 2, HEAD_RADIUS);
+        break;
+
+      case 'tidy':
+        // Conservative neat short hair, slightly grey-tinted.
+        g.fillRoundedRect(-HEAD_RADIUS - 1, -HEAD_RADIUS - 2, HEAD_RADIUS * 2 + 2, HEAD_RADIUS, {
+          tl: 12, tr: 12, bl: 6, br: 6,
+        });
+        // Lighter highlights at temples (suggests salt-and-pepper).
+        g.fillStyle(this.lighten(style.hairColor, 1.4), 1);
+        g.fillRect(-HEAD_RADIUS - 1, -8, 4, 8);
+        g.fillRect(HEAD_RADIUS - 3, -8, 4, 8);
+        g.fillStyle(skinColor, 1);
+        g.fillRect(-HEAD_RADIUS, 0, HEAD_RADIUS * 2, HEAD_RADIUS);
+        break;
+
+      case 'messy':
+        // Asymmetric, scattered tufts.
+        g.fillRoundedRect(-HEAD_RADIUS - 1, -HEAD_RADIUS - 1, HEAD_RADIUS * 2 + 2, HEAD_RADIUS, {
+          tl: 10, tr: 14, bl: 4, br: 4,
+        });
+        // Three small tufts pointing different ways.
+        g.fillTriangle(-10, -HEAD_RADIUS, -6, -HEAD_RADIUS - 7, -2, -HEAD_RADIUS);
+        g.fillTriangle(-2, -HEAD_RADIUS, 4, -HEAD_RADIUS - 9, 7, -HEAD_RADIUS);
+        g.fillTriangle(7, -HEAD_RADIUS, 11, -HEAD_RADIUS - 5, 14, -HEAD_RADIUS);
+        // Side strand.
+        g.fillRect(-HEAD_RADIUS - 1, -2, 3, 8);
+        g.fillStyle(skinColor, 1);
+        g.fillRect(-HEAD_RADIUS, 2, HEAD_RADIUS * 2, HEAD_RADIUS);
         break;
     }
 
     parent.add(g);
   }
 
-  /** Subtle breathing — head bobs ~1px on a slow loop. */
   private startIdle() {
     const scene = this.container.scene;
     if (!scene) return;
@@ -200,16 +237,11 @@ export class AvatarSprite {
     this.bodyGroup.y = 6;
   }
 
-  /**
-   * Tell the avatar it's moving (or not). Triggers walk bob animation when on,
-   * idle breath when off.
-   */
   setMoving(moving: boolean) {
     if (moving === this.isMoving) return;
     this.isMoving = moving;
     const scene = this.container.scene;
     if (!scene) return;
-
     if (moving) {
       this.idleTween?.stop();
       this.walkTween = scene.tweens.add({
@@ -226,20 +258,15 @@ export class AvatarSprite {
     }
   }
 
-  /** Flip horizontally based on movement direction. Pure flip, no separate sprite needed. */
   setFacing(vx: number) {
-    if (vx > 0.1) {
-      if (this.facing !== 'right') {
-        this.headGroup.scaleX = 1;
-        this.bodyGroup.scaleX = 1;
-        this.facing = 'right';
-      }
-    } else if (vx < -0.1) {
-      if (this.facing !== 'left') {
-        this.headGroup.scaleX = -1;
-        this.bodyGroup.scaleX = -1;
-        this.facing = 'left';
-      }
+    if (vx > 0.1 && this.facing !== 'right') {
+      this.headGroup.scaleX = 1;
+      this.bodyGroup.scaleX = 1;
+      this.facing = 'right';
+    } else if (vx < -0.1 && this.facing !== 'left') {
+      this.headGroup.scaleX = -1;
+      this.bodyGroup.scaleX = -1;
+      this.facing = 'left';
     }
   }
 
@@ -248,20 +275,23 @@ export class AvatarSprite {
     if (!scene) return;
     if (speaking) {
       if (this.speakingTween) return;
-      this.speakingRing.setStrokeStyle(3, 0xfff4ec, 0.7);
+      // Qi pulse: warm gold instead of white. Slower, softer than Phase 4.
+      this.speakingRing.setStrokeStyle(3, 0xe8b870, 0.8);
       this.speakingTween = scene.tweens.add({
         targets: this.speakingRing,
-        scale: { from: 0.85, to: 1.25 },
-        duration: 700,
-        ease: 'Sine.easeInOut',
+        scale: { from: 0.85, to: 1.35 },
+        alpha:  { from: 0.8, to: 0.2 },
+        duration: 900,
+        ease: 'Sine.easeOut',
         yoyo: true,
         repeat: -1,
       });
     } else {
       this.speakingTween?.stop();
       this.speakingTween = null;
-      this.speakingRing.setStrokeStyle(3, 0xfff4ec, 0);
+      this.speakingRing.setStrokeStyle(3, 0xe8b870, 0);
       this.speakingRing.setScale(1);
+      this.speakingRing.setAlpha(0);
     }
   }
 
@@ -272,11 +302,17 @@ export class AvatarSprite {
     this.container.destroy();
   }
 
-  /** Multiply each RGB channel — cheap "darken" used for outline tones. */
   private darken(hex: number, factor: number): number {
     const r = Math.floor(((hex >> 16) & 0xff) * factor);
     const g = Math.floor(((hex >> 8) & 0xff) * factor);
     const b = Math.floor((hex & 0xff) * factor);
+    return (r << 16) | (g << 8) | b;
+  }
+
+  private lighten(hex: number, factor: number): number {
+    const r = Math.min(255, Math.floor(((hex >> 16) & 0xff) * factor));
+    const g = Math.min(255, Math.floor(((hex >> 8) & 0xff) * factor));
+    const b = Math.min(255, Math.floor((hex & 0xff) * factor));
     return (r << 16) | (g << 8) | b;
   }
 }

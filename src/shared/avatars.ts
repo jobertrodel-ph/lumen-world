@@ -1,92 +1,106 @@
 /**
- * The six avatar styles. Each is a coherent look — body color, hair, accent.
- * Designed to feel like distinct personalities without being literal characters.
+ * Six modern-cultivation avatar styles. Each is a coherent look — body color,
+ * hair, outfit, accent. Drawn procedurally; no bitmap assets.
  *
- * Drawn procedurally with Phaser graphics. No bitmap assets needed.
- *
- * Naming: warm-named for personality flavor; user picks before entering world.
+ * Designed to feel like distinct personalities: disciplined, street, alchemist,
+ * confident, elder, rogue. Picker shows live SVG previews.
  */
 
 export interface AvatarStyle {
   id: string;
   name: string;
+  /** Bilingual flavor name shown subtly under the picker tile name. */
+  subtitle: string;
   /** Skin/body tint. */
   bodyColor: number;
-  /** Hair color. 0 = bald (no hair drawn). */
+  /** Hair color. */
   hairColor: number;
-  /** "bob" | "long" | "buzz" | "tuft" | "wave" */
-  hairStyle: 'bob' | 'long' | 'buzz' | 'tuft' | 'wave' | 'bald';
-  /** Outfit color (the body block). */
+  hairStyle: 'sweep' | 'undercut' | 'pony' | 'long-side' | 'tidy' | 'messy';
+  /** Outfit (the body block) base. */
   outfitColor: number;
-  /** Accent — scarf, glasses, etc. 0 = none. */
+  /** Outfit secondary — collar / sash / lapel. */
+  outfitSecondary: number;
+  /** Accent — pendant, sash, glasses, etc. 0 = none. */
   accentColor: number;
-  accentType: 'scarf' | 'glasses' | 'earring' | 'collar' | 'none';
+  accentType: 'pendant' | 'sash' | 'glasses' | 'earring' | 'scarf' | 'none';
 }
 
 export const AVATAR_STYLES: AvatarStyle[] = [
   {
-    id: 'ember',
-    name: 'Ember',
-    bodyColor: 0xe8a07f,
-    hairColor: 0x3a2418,
-    hairStyle: 'bob',
-    outfitColor: 0xc04848,
-    accentColor: 0xf5b39a,
-    accentType: 'scarf',
-  },
-  {
-    id: 'sage',
-    name: 'Sage',
-    bodyColor: 0xd9b48c,
-    hairColor: 0x5a4030,
-    hairStyle: 'wave',
-    outfitColor: 0x4a6b58,
-    accentColor: 0xfff4ec,
-    accentType: 'collar',
-  },
-  {
-    id: 'aster',
-    name: 'Aster',
-    bodyColor: 0xf2c4a3,
-    hairColor: 0x8a3f3f,
-    hairStyle: 'long',
-    outfitColor: 0x6b4880,
-    accentColor: 0xffd966,
-    accentType: 'earring',
-  },
-  {
-    id: 'rune',
-    name: 'Rune',
-    bodyColor: 0xb88860,
+    id: 'yan',
+    name: 'Yan',
+    subtitle: '言 · disciplined',
+    bodyColor: 0xe5c4a8,
     hairColor: 0x1a1a1a,
-    hairStyle: 'buzz',
-    outfitColor: 0x2a3458,
-    accentColor: 0xfff4ec,
+    hairStyle: 'sweep',
+    outfitColor: 0x1a1d28,        // black blazer
+    outfitSecondary: 0x2a3340,    // jacket lapel
+    accentColor: 0x7fc4a3,        // jade pendant
+    accentType: 'pendant',
+  },
+  {
+    id: 'ren',
+    name: 'Ren',
+    subtitle: '刃 · street',
+    bodyColor: 0xc9a888,
+    hairColor: 0x2a2018,
+    hairStyle: 'undercut',
+    outfitColor: 0x3a3540,        // dark hoodie
+    outfitSecondary: 0x2a2530,    // hood shadow
+    accentColor: 0xc84848,        // crimson sash
+    accentType: 'sash',
+  },
+  {
+    id: 'lin',
+    name: 'Lin',
+    subtitle: '林 · alchemist',
+    bodyColor: 0xeed0b4,
+    hairColor: 0x4a3020,
+    hairStyle: 'pony',
+    outfitColor: 0xd8d4cc,        // lab coat off-white
+    outfitSecondary: 0x9a4848,    // tang collar peeking out
+    accentColor: 0x2a2a3a,        // dark glasses frame
     accentType: 'glasses',
   },
   {
-    id: 'wren',
-    name: 'Wren',
-    bodyColor: 0xead0b0,
-    hairColor: 0xe0a040,
-    hairStyle: 'tuft',
-    outfitColor: 0x8a5a3a,
-    accentColor: 0xffd966,
-    accentType: 'none',
+    id: 'mei',
+    name: 'Mei',
+    subtitle: '梅 · confident',
+    bodyColor: 0xe8b896,
+    hairColor: 0x1a0e0a,
+    hairStyle: 'long-side',
+    outfitColor: 0x9a3050,        // crimson crop
+    outfitSecondary: 0x6a1a30,    // belt
+    accentColor: 0xe8b870,        // gold hoop earring
+    accentType: 'earring',
   },
   {
-    id: 'ivy',
-    name: 'Ivy',
+    id: 'zhe',
+    name: 'Zhe',
+    subtitle: '哲 · elder',
+    bodyColor: 0xd4b89a,
+    hairColor: 0x4a4a48,          // grey-tipped
+    hairStyle: 'tidy',
+    outfitColor: 0x3a3a3e,        // grey turtleneck
+    outfitSecondary: 0x4a4a4e,    // collar
+    accentColor: 0xe8b870,        // gold pendant
+    accentType: 'pendant',
+  },
+  {
+    id: 'hao',
+    name: 'Hao',
+    subtitle: '昊 · rogue',
     bodyColor: 0xc99880,
-    hairColor: 0x5a8a4a,
-    hairStyle: 'long',
-    outfitColor: 0x3a5868,
-    accentColor: 0xa0c468,
+    hairColor: 0x1a1410,
+    hairStyle: 'messy',
+    outfitColor: 0x2a2a30,        // dark jacket
+    outfitSecondary: 0x3a3a40,    // jacket trim
+    accentColor: 0x9a3848,        // wine scarf
     accentType: 'scarf',
   },
 ];
 
-export const DEFAULT_AVATAR_ID = 'ember';
+export const DEFAULT_AVATAR_ID = 'yan';
 
 export function getAvatarStyle(id: string): AvatarStyle {
   return AVATAR_STYLES.find((a) => a.id === id) ?? AVATAR_STYLES[0];

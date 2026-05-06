@@ -1,7 +1,3 @@
-/**
- * Thin wrapper over the shared world module. Re-exports the data and adds
- * client-side conveniences (zone-id -> display name lookup).
- */
 export * from './world';
 import { ROOMS } from './world';
 

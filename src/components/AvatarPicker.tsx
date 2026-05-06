@@ -22,24 +22,24 @@ export default function AvatarPicker({ initialAvatarId, onConfirm }: Props) {
   return (
     <div className="picker">
       <div className="picker__atmosphere" aria-hidden="true">
-        <span className="blob blob--peach" />
-        <span className="blob blob--coral" />
-        <span className="blob blob--violet" />
+        <span className="blob blob--jade" />
+        <span className="blob blob--crimson" />
+        <span className="blob blob--gold" />
       </div>
 
       <main className="picker__panel">
         <div className="brand">
           <span className="brand__dot" />
-          <span className="brand__name">LUMEN</span>
+          <span className="brand__name">九霄 · NINTH SKY</span>
         </div>
 
         <h1 className="picker__headline">
-          <span className="headline__line">Pick a</span>
+          <span className="headline__line">Pick your</span>
           <span className="headline__line headline__line--accent">presence.</span>
         </h1>
 
         <p className="picker__sub">
-          Hi {user?.displayName?.split(' ')[0] ?? 'there'}. Choose how you'd like to show up.
+          Hi {user?.displayName?.split(' ')[0] ?? 'friend'}. Six paths, no wrong choice.
         </p>
 
         <div className="picker__grid">
@@ -53,6 +53,7 @@ export default function AvatarPicker({ initialAvatarId, onConfirm }: Props) {
             >
               <AvatarPreview style={style} size={84} />
               <span className="picker__name">{style.name}</span>
+              <span className="picker__subtitle">{style.subtitle}</span>
             </button>
           ))}
         </div>
@@ -62,7 +63,7 @@ export default function AvatarPicker({ initialAvatarId, onConfirm }: Props) {
             Sign out
           </button>
           <button className="picker__enter" onClick={enter} type="button">
-            Enter Lumen →
+            Enter Ninth Sky →
           </button>
         </div>
       </main>

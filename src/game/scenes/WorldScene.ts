@@ -49,10 +49,8 @@ export default class WorldScene extends Phaser.Scene {
   private remotes = new Map<string, RemotePlayer>();
   private remoteData = new Map<string, RemotePlayerData>();
 
-  private currentRoom: RoomId = 'atrium';
+  private currentRoom: RoomId = 'rooftop';
   private roomRenderer: RoomRenderer | null = null;
-
-  /** True after shutdown(); blocks late network handlers from touching dead objects. */
   private destroyed = false;
 
   private lastSendAt = 0;
@@ -61,6 +59,7 @@ export default class WorldScene extends Phaser.Scene {
   private lastAudibilityAt = 0;
 
   private hudRoomLabel?: Phaser.GameObjects.Text;
+  private hudRoomSubtitle?: Phaser.GameObjects.Text;
   private hudZoneLabel?: Phaser.GameObjects.Text;
   private currentZone = '';
 
@@ -90,8 +89,8 @@ export default class WorldScene extends Phaser.Scene {
       .text(spawn.spawnX, spawn.spawnY - 38, profile.displayName, {
         fontFamily: '"General Sans", system-ui, sans-serif',
         fontSize: '13px',
-        color: '#f3eee6',
-        backgroundColor: 'rgba(13, 15, 26, 0.78)',
+        color: '#f0ece4',
+        backgroundColor: 'rgba(7, 9, 15, 0.78)',
         padding: { x: 10, y: 4 },
       })
       .setOrigin(0.5)
@@ -100,7 +99,6 @@ export default class WorldScene extends Phaser.Scene {
     this.updateCameraBounds();
     this.cameras.main.startFollow(this.avatarSprite.container, true, 0.12, 0.12);
     this.applyResponsiveZoom();
-
     this.scale.on('resize', () => this.applyResponsiveZoom());
 
     this.cursors = this.input.keyboard!.createCursorKeys();
@@ -152,10 +150,7 @@ export default class WorldScene extends Phaser.Scene {
       if (!resp.ok) throw new Error(`token ${resp.status}: ${await resp.text()}`);
       const data = (await resp.json()) as { token: string; url: string };
       if (!data.url) throw new Error('LIVEKIT_URL not configured on server');
-
-      // Bail if the scene was destroyed during the network round-trip.
       if (this.destroyed) return;
-
       await this.voice.connect({
         serverUrl: data.url,
         token: data.token,
@@ -179,7 +174,7 @@ export default class WorldScene extends Phaser.Scene {
   private renderRoom(roomId: RoomId): void {
     this.roomRenderer?.destroy();
     this.roomRenderer = new RoomRenderer(this, roomId);
-    this.cameras.main.setBackgroundColor('#0a0c16');
+    this.cameras.main.setBackgroundColor('#07090f');
   }
 
   private updateCameraBounds(): void {
@@ -191,20 +186,39 @@ export default class WorldScene extends Phaser.Scene {
     const r = ROOMS[this.currentRoom];
     this.hudRoomLabel = this.add
       .text(this.scale.width / 2, 28, r.name.toUpperCase(), {
-        fontFamily: '"Fraunces", serif', fontStyle: 'italic',
-        fontSize: '14px', color: '#f3eee6',
+        fontFamily: '"Noto Serif SC", "Fraunces", serif',
+        fontSize: '15px', color: '#f0ece4',
       })
-      .setOrigin(0.5).setScrollFactor(0).setDepth(1000).setAlpha(0.7);
+      .setOrigin(0.5).setScrollFactor(0).setDepth(1000).setAlpha(0.75);
+
+    this.hudRoomSubtitle = this.add
+      .text(this.scale.width / 2, 50, r.subtitle, {
+        fontFamily: '"Noto Serif SC", serif',
+        fontSize: '12px', color: '#7fc4a3',
+      })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(1000).setAlpha(0.65);
 
     this.hudZoneLabel = this.add
-      .text(this.scale.width / 2, 50, '', {
+      .text(this.scale.width / 2, 72, '', {
         fontFamily: '"General Sans", system-ui, sans-serif',
-        fontSize: '11px', color: '#a09a8e',
+        fontSize: '11px', color: '#9a9488',
       })
       .setOrigin(0.5).setScrollFactor(0).setDepth(1000);
   }
 
-  // --- Network handlers — all guarded against late-arriving messages ---
+  private updateRoomHud(roomId: RoomId): void {
+    if (!this.hudRoomLabel || !this.hudRoomSubtitle) return;
+    const r = ROOMS[roomId];
+    this.hudRoomLabel.setText(r.name.toUpperCase());
+    this.hudRoomSubtitle.setText(r.subtitle);
+    this.tweens.add({
+      targets: [this.hudRoomLabel, this.hudRoomSubtitle],
+      alpha: { from: 0, to: 0.75 },
+      duration: 700,
+    });
+  }
+
+  // --- Network handlers (with destroyed guards) ---
 
   private handlePlayerAdd(sessionId: string, p: RemotePlayerData): void {
     if (this.destroyed || !this.sys.isActive()) return;
@@ -263,11 +277,7 @@ export default class WorldScene extends Phaser.Scene {
     this.avatarX = x; this.avatarY = y;
     this.renderRoom(newRoom);
     this.updateCameraBounds();
-
-    if (this.hudRoomLabel) {
-      this.hudRoomLabel.setText(ROOMS[newRoom].name.toUpperCase());
-      this.tweens.add({ targets: this.hudRoomLabel, alpha: { from: 0, to: 0.7 }, duration: 600 });
-    }
+    this.updateRoomHud(newRoom);
 
     for (const [sid, remote] of this.remotes) { remote.destroy(); this.remotes.delete(sid); }
     for (const [sid, data] of this.remoteData) {
@@ -292,10 +302,10 @@ export default class WorldScene extends Phaser.Scene {
   private showBanner(message: string): void {
     if (this.destroyed || !this.sys.isActive()) return;
     const banner = this.add
-      .text(this.scale.width / 2, 90, message, {
+      .text(this.scale.width / 2, 110, message, {
         fontFamily: '"General Sans", system-ui, sans-serif',
-        fontSize: '14px', color: '#f0856b',
-        backgroundColor: 'rgba(13, 15, 26, 0.92)',
+        fontSize: '14px', color: '#e88a6a',
+        backgroundColor: 'rgba(7, 9, 15, 0.92)',
         padding: { x: 14, y: 8 },
       })
       .setOrigin(0.5).setScrollFactor(0).setDepth(1000);
@@ -375,17 +385,13 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   shutdown() {
-    // Mark destroyed FIRST so any in-flight handlers bail before touching state.
     this.destroyed = true;
-
     this.network.disconnect();
     this.voice.disconnect();
     registerVoiceManager(null);
-
     this.remotes.forEach((r) => r.destroy());
     this.remotes.clear();
     this.remoteData.clear();
-
     this.roomRenderer?.destroy();
     this.roomRenderer = null;
     this.avatarSprite?.destroy();
