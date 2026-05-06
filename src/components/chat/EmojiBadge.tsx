@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { getEmoji } from './emojis';
 
 interface Props {
@@ -6,23 +7,27 @@ interface Props {
 }
 
 /**
- * Render a Fluent emoji by id. If the id isn't in our catalog, show a
- * subtle placeholder so reactions don't break the layout.
+ * Render a Fluent emoji. Tries the animated webp first; if that fails to load
+ * (e.g., older browser, CDN miss), falls back to the static 3D PNG.
  */
 export function EmojiBadge({ id, size = 16 }: Props) {
   const emoji = getEmoji(id);
+  const [errored, setErrored] = useState(false);
+
   if (!emoji) {
     return <span className="emoji-badge emoji-badge--missing" aria-hidden="true">·</span>;
   }
+
   return (
     <img
-      src={emoji.url}
+      src={errored ? emoji.static : emoji.animated}
       alt={emoji.name}
       width={size}
       height={size}
       className="emoji-badge"
       loading="lazy"
       draggable={false}
+      onError={() => setErrored(true)}
     />
   );
 }

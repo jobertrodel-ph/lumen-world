@@ -12,6 +12,8 @@ import { ROOMS, RoomId, isBlocked, ZONE_NAMES } from '../../shared/world-helpers
 import { readJoystick } from '../input/inputBridge';
 import { registerChatActions, setLocation, setMessages } from '../chat/chatBridge';
 import type { ChatMessage } from '../chat/types';
+import { findPath } from '../movement/pathfinding';
+import { getActiveSettings, subscribeSettings } from '../../shared/settings';
 
 const WALK_SPEED = 220;
 const AVATAR_RADIUS = 20;
@@ -19,11 +21,14 @@ const SEND_INTERVAL_MS = 50;
 const MOVE_EPSILON = 0.5;
 const AUDIBILITY_TICK_MS = 200;
 
-interface WASDKeys {
-  W: Phaser.Input.Keyboard.Key;
-  A: Phaser.Input.Keyboard.Key;
-  S: Phaser.Input.Keyboard.Key;
-  D: Phaser.Input.Keyboard.Key;
+// How close the avatar needs to get to a waypoint before advancing.
+const WAYPOINT_REACHED_DIST = 6;
+
+interface ArrowKeys {
+  up: Phaser.Input.Keyboard.Key;
+  down: Phaser.Input.Keyboard.Key;
+  left: Phaser.Input.Keyboard.Key;
+  right: Phaser.Input.Keyboard.Key;
 }
 
 interface RemotePlayerData {
@@ -42,8 +47,7 @@ export default class WorldScene extends Phaser.Scene {
   private nameTag!: Phaser.GameObjects.Text;
   private avatarX = 0;
   private avatarY = 0;
-  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private wasd!: WASDKeys;
+  private arrowKeys!: ArrowKeys;
 
   private network = new NetworkManager();
   private voice = new VoiceManager();
@@ -64,6 +68,15 @@ export default class WorldScene extends Phaser.Scene {
   private hudRoomSubtitle?: Phaser.GameObjects.Text;
   private hudZoneLabel?: Phaser.GameObjects.Text;
   private currentZone = '';
+
+  // ---- Pathfinding state ----
+  private currentPath: Array<{ x: number; y: number }> = [];
+  private pathIndex = 0;
+  private destIndicator: Phaser.GameObjects.Container | null = null;
+  private destIndicatorTween: Phaser.Tweens.Tween | null = null;
+
+  // Settings — current active values for movement mode etc.
+  private settingsUnsubscribe: (() => void) | null = null;
 
   constructor() {
     super('World');
@@ -103,13 +116,31 @@ export default class WorldScene extends Phaser.Scene {
     this.applyResponsiveZoom();
     this.scale.on('resize', () => this.applyResponsiveZoom());
 
-    this.cursors = this.input.keyboard!.createCursorKeys();
-    this.wasd = this.input.keyboard!.addKeys('W,A,S,D') as WASDKeys;
+    // Arrow keys (fallback movement).
+    this.arrowKeys = {
+      up:    this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.UP),
+      down:  this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.DOWN),
+      left:  this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.LEFT),
+      right: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.RIGHT),
+    };
+
+    // Right-click handler — set destination.
+    // Phaser pointer events fire from the canvas itself.
+    this.input.mouse?.disableContextMenu();   // suppress browser context menu on right-click
+    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      // Only react to right mouse button (button 2). Ignore left/middle.
+      if (pointer.rightButtonDown()) {
+        // Convert from camera/screen space to world space.
+        const worldX = pointer.worldX;
+        const worldY = pointer.worldY;
+        this.handleClickToMove(worldX, worldY);
+      }
+    });
 
     this.makeRoomHud();
 
-    // Initial bridge state.
     setLocation(this.currentRoom, this.currentZone);
+    setActiveSettingsListener(this);
 
     if (!serverUrl || !idToken) {
       this.showBanner(!serverUrl ? 'Set VITE_GAME_SERVER_URL.' : 'Missing auth token.');
@@ -134,7 +165,6 @@ export default class WorldScene extends Phaser.Scene {
       })
       .then(() => {
         if (this.destroyed) return;
-        // Register chat send/react/bump now that we're connected.
         registerChatActions({
           send: (text, scope, opts) => this.network.sendChat(text, scope, opts),
           react: (id, emoji) => this.network.reactChat(id, emoji),
@@ -234,7 +264,89 @@ export default class WorldScene extends Phaser.Scene {
     });
   }
 
-  // --- Network handlers ---
+  // ---------------------------------------------------------------- pathing
+
+  /**
+   * User right-clicked at (worldX, worldY). Compute path and set the
+   * indicator. If the click is on a wall, the pathfinder snaps to nearest
+   * walkable cell; if no path exists, we just play a subtle "bad click"
+   * indicator and bail.
+   */
+  private handleClickToMove(worldX: number, worldY: number): void {
+    // If a UI element above the canvas was clicked, ignore. Phaser already
+    // routes pointer events to scenes only when the canvas is the target,
+    // so this is mostly defensive.
+    if (this.destroyed) return;
+
+    // If movement mode is "arrows", click-to-move is disabled.
+    if (getActiveSettings().movementMode === 'arrows') return;
+
+    const path = findPath(this.currentRoom, this.avatarX, this.avatarY, worldX, worldY);
+    if (!path || path.length === 0) {
+      // No path — flash a red indicator to acknowledge the click.
+      this.flashIndicator(worldX, worldY, 0xc84848);
+      return;
+    }
+
+    this.currentPath = path;
+    this.pathIndex = 0;
+    this.placeDestIndicator(path[path.length - 1].x, path[path.length - 1].y);
+  }
+
+  private placeDestIndicator(x: number, y: number): void {
+    this.clearDestIndicator();
+    const container = this.add.container(x, y).setDepth(5);
+
+    // Outer ring + inner dot. RTS-ish.
+    const outer = this.add.circle(0, 0, 18, 0x7fc4a3, 0.0);
+    outer.setStrokeStyle(2, 0x7fc4a3, 0.85);
+    const dot = this.add.circle(0, 0, 4, 0x7fc4a3, 0.95);
+
+    container.add([outer, dot]);
+    this.destIndicator = container;
+
+    // Pulse the ring.
+    this.destIndicatorTween = this.tweens.add({
+      targets: outer,
+      scale: { from: 0.6, to: 1.4 },
+      alpha: { from: 1, to: 0 },
+      duration: 900,
+      ease: 'Sine.out',
+      repeat: -1,
+    });
+  }
+
+  private flashIndicator(x: number, y: number, color: number): void {
+    const ring = this.add.circle(x, y, 18, color, 0).setDepth(5);
+    ring.setStrokeStyle(2, color, 0.9);
+    this.tweens.add({
+      targets: ring,
+      scale: { from: 0.6, to: 1.5 },
+      alpha: { from: 0.9, to: 0 },
+      duration: 500,
+      ease: 'Sine.out',
+      onComplete: () => ring.destroy(),
+    });
+  }
+
+  private clearDestIndicator(): void {
+    this.destIndicatorTween?.stop();
+    this.destIndicatorTween = null;
+    this.destIndicator?.destroy();
+    this.destIndicator = null;
+  }
+
+  /**
+   * Cancel the current path. Used when arrow keys are pressed (manual
+   * override) or when the avatar arrives at the final waypoint.
+   */
+  private cancelPath(): void {
+    this.currentPath = [];
+    this.pathIndex = 0;
+    this.clearDestIndicator();
+  }
+
+  // ---------------------------------------------------------- network handlers
 
   private handlePlayerAdd(sessionId: string, p: RemotePlayerData): void {
     if (this.destroyed || !this.sys.isActive()) return;
@@ -291,6 +403,7 @@ export default class WorldScene extends Phaser.Scene {
     this.currentRoom = newRoom;
     this.avatarSprite.container.setPosition(x, y);
     this.avatarX = x; this.avatarY = y;
+    this.cancelPath();   // a portal teleport invalidates the current path
     this.renderRoom(newRoom);
     this.updateCameraBounds();
     this.updateRoomHud(newRoom);
@@ -342,10 +455,6 @@ export default class WorldScene extends Phaser.Scene {
     });
   }
 
-  /**
-   * Returns true if movement input should be suppressed because the user
-   * is typing somewhere (chat input or any other text field).
-   */
   private isTyping(): boolean {
     const active = document.activeElement;
     if (!active) return false;
@@ -357,45 +466,94 @@ export default class WorldScene extends Phaser.Scene {
     );
   }
 
+  // ---------------------------------------------------------------- main loop
+
   update(time: number, delta: number) {
     if (this.destroyed) return;
 
-    let vx = 0, vy = 0;
+    const settings = getActiveSettings();
     const typing = this.isTyping();
+    const stepSize = (delta / 1000) * WALK_SPEED;
 
+    let vx = 0, vy = 0;
+
+    // Arrow keys (or click in arrows mode) — manual movement, cancels current path.
     if (!typing) {
-      if (this.cursors.left.isDown || this.wasd.A.isDown) vx -= 1;
-      if (this.cursors.right.isDown || this.wasd.D.isDown) vx += 1;
-      if (this.cursors.up.isDown || this.wasd.W.isDown) vy -= 1;
-      if (this.cursors.down.isDown || this.wasd.S.isDown) vy += 1;
+      if (this.arrowKeys.left.isDown) vx -= 1;
+      if (this.arrowKeys.right.isDown) vx += 1;
+      if (this.arrowKeys.up.isDown) vy -= 1;
+      if (this.arrowKeys.down.isDown) vy += 1;
     }
 
+    // If user is using arrow keys, cancel any active path.
+    if (vx !== 0 || vy !== 0) {
+      if (this.currentPath.length > 0) this.cancelPath();
+    }
+
+    // Joystick (mobile) — also cancels path.
     if (vx === 0 && vy === 0) {
       const j = readJoystick();
-      vx = j.x;
-      vy = j.y;
+      if (j.x !== 0 || j.y !== 0) {
+        if (this.currentPath.length > 0) this.cancelPath();
+        vx = j.x;
+        vy = j.y;
+      }
     } else if (vx !== 0 && vy !== 0) {
       const inv = 1 / Math.SQRT2;
       vx *= inv;
       vy *= inv;
     }
 
-    const step = (delta / 1000) * WALK_SPEED;
-    let nextX = this.avatarX + vx * step;
-    let nextY = this.avatarY + vy * step;
+    // If we have a current path and no manual input, follow it.
+    if (vx === 0 && vy === 0 && this.currentPath.length > 0 && settings.movementMode === 'click') {
+      const next = this.currentPath[this.pathIndex];
+      const dx = next.x - this.avatarX;
+      const dy = next.y - this.avatarY;
+      const dist = Math.hypot(dx, dy);
 
-    const room = ROOMS[this.currentRoom];
-    nextX = Math.max(AVATAR_RADIUS, Math.min(room.width - AVATAR_RADIUS, nextX));
-    nextY = Math.max(AVATAR_RADIUS, Math.min(room.height - AVATAR_RADIUS, nextY));
-    if (!isBlocked(this.currentRoom, nextX, this.avatarY, AVATAR_RADIUS)) this.avatarX = nextX;
-    if (!isBlocked(this.currentRoom, this.avatarX, nextY, AVATAR_RADIUS)) this.avatarY = nextY;
+      if (dist <= WAYPOINT_REACHED_DIST || dist <= stepSize) {
+        // Snap to waypoint and advance.
+        this.avatarX = next.x;
+        this.avatarY = next.y;
+        this.pathIndex++;
+        if (this.pathIndex >= this.currentPath.length) {
+          this.cancelPath();
+        }
+      } else {
+        const move = stepSize / dist;
+        const nextX = this.avatarX + dx * move;
+        const nextY = this.avatarY + dy * move;
+        // Sanity: still respect collision.
+        if (!isBlocked(this.currentRoom, nextX, this.avatarY, AVATAR_RADIUS)) {
+          this.avatarX = nextX;
+        }
+        if (!isBlocked(this.currentRoom, this.avatarX, nextY, AVATAR_RADIUS)) {
+          this.avatarY = nextY;
+        }
+      }
+    } else if (vx !== 0 || vy !== 0) {
+      // Manual movement (arrows or joystick).
+      const nextX = this.avatarX + vx * stepSize;
+      const nextY = this.avatarY + vy * stepSize;
+      const room = ROOMS[this.currentRoom];
+      const clampedX = Math.max(AVATAR_RADIUS, Math.min(room.width - AVATAR_RADIUS, nextX));
+      const clampedY = Math.max(AVATAR_RADIUS, Math.min(room.height - AVATAR_RADIUS, nextY));
+      if (!isBlocked(this.currentRoom, clampedX, this.avatarY, AVATAR_RADIUS)) this.avatarX = clampedX;
+      if (!isBlocked(this.currentRoom, this.avatarX, clampedY, AVATAR_RADIUS)) this.avatarY = clampedY;
+    }
 
     this.avatarSprite.container.setPosition(this.avatarX, this.avatarY);
     this.nameTag.setPosition(this.avatarX, this.avatarY - 38);
 
-    const moving = Math.hypot(vx, vy) > 0.05;
+    // Compute movement direction for animation.
+    const dxThisFrame = this.avatarX - this.lastSentX;
+    const dyThisFrame = this.avatarY - this.lastSentY;
+    const moving = Math.hypot(dxThisFrame, dyThisFrame) > 0.5 ||
+      vx !== 0 || vy !== 0 ||
+      this.currentPath.length > 0;
     this.avatarSprite.setMoving(moving);
-    if (Math.abs(vx) > 0.05) this.avatarSprite.setFacing(vx);
+    if (Math.abs(dxThisFrame) > 0.1) this.avatarSprite.setFacing(dxThisFrame);
+    else if (Math.abs(vx) > 0.05) this.avatarSprite.setFacing(vx);
 
     this.remotes.forEach((r) => r.tick());
 
@@ -434,5 +592,26 @@ export default class WorldScene extends Phaser.Scene {
     this.roomRenderer = null;
     this.avatarSprite?.destroy();
     this.nameTag?.destroy();
+    this.clearDestIndicator();
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = null;
   }
+}
+
+/** Subscribe scene to settings — currently used only to cancel an active path
+ *  when the user switches to "arrows" mode. */
+function setActiveSettingsListener(scene: WorldScene): void {
+  // Self-reference so the closure can hold a typed scene.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const s = scene as any;
+  s.settingsUnsubscribe = subscribeSettings((settings) => {
+    if (settings.movementMode === 'arrows') {
+      // Cancel any active path so it doesn't keep walking after the toggle.
+      if (s.currentPath?.length > 0) {
+        s.currentPath = [];
+        s.pathIndex = 0;
+        s.clearDestIndicator?.();
+      }
+    }
+  });
 }

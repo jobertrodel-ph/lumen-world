@@ -7,6 +7,7 @@ import { RotateHint } from './RotateHint';
 import { useViewport } from './useViewport';
 import { ChatPanel, type ChatPanelHandle } from './chat/ChatPanel';
 import { useChatKeyboard } from './chat/useChatKeyboard';
+import { SettingsPanel } from './SettingsPanel';
 
 export default function GameContainer({ avatarId }: { avatarId: string }) {
   const { user, logout } = useAuth();
@@ -21,7 +22,6 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
   const showJoystick = isTouch && isSmall;
   const showRotateHint = isTouch && isSmall && isPortrait;
 
-  // Wire Enter key behavior to chat panel.
   useChatKeyboard(chatPanelRef);
 
   useEffect(() => {
@@ -100,6 +100,8 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
             </span>
           </button>
 
+          <SettingsPanel />
+
           <button type="button" className="hud__logout" onClick={logout}>
             Sign out
           </button>
@@ -112,10 +114,13 @@ export default function GameContainer({ avatarId }: { avatarId: string }) {
 
       {!showJoystick && (
         <div className="hud-controls">
-          <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
-          <span>to move · </span>
+          <span>Right-click to walk</span>
+          <span className="hud-controls__sep">·</span>
+          <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd>
+          <span>nudge</span>
+          <span className="hud-controls__sep">·</span>
           <kbd>Enter</kbd>
-          <span>to chat · walk close to hear</span>
+          <span>chat</span>
         </div>
       )}
 

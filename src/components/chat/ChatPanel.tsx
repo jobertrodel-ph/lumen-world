@@ -17,17 +17,13 @@ import {
 import type { ChatMessage } from '../../game/chat/types';
 import { ChatMessageItem } from './ChatMessageItem';
 import { EmojiPicker } from './EmojiPicker';
+import { getEmoji } from './emojis';
 
 export interface ChatPanelHandle {
-  /** Toggle visibility. Called from the keyboard hook. */
   toggle: () => void;
-  /** True if the input currently has focus. */
   isInputFocused: () => boolean;
-  /** True if the input is empty. Used to detect "press Enter to close". */
   isInputEmpty: () => boolean;
-  /** True if the panel is currently open. */
   isOpen: () => boolean;
-  /** Submit the current input (if any). */
   submit: () => void;
 }
 
@@ -40,10 +36,18 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
   const [input, setInput] = useState('');
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [quoteOf, setQuoteOf] = useState<ChatMessage | null>(null);
-  const [emojiPickerFor, setEmojiPickerFor] = useState<string | null>(null);
+  const [reactionPickerFor, setReactionPickerFor] = useState<string | null>(null);
+  const [composerPickerOpen, setComposerPickerOpen] = useState(false);
+
+  // Last-seen-id tracker, used to compute unread counters per scope.
+  // We track separately for room and zone, plus an overall (collapsed) counter.
+  const [lastSeenIds, setLastSeenIds] = useState<{ collapsed: string | null; room: string | null; zone: string | null }>({
+    collapsed: null, room: null, zone: null,
+  });
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   // Subscribe to bridge updates.
   useEffect(() => {
@@ -55,8 +59,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
     });
   }, []);
 
-  // Auto-scroll to bottom on new messages, but only if user is already near
-  // the bottom — avoid yanking them away if they're scrolled up reading.
+  // Auto-scroll to bottom on new messages, only if user is already near bottom.
   useEffect(() => {
     const node = listRef.current;
     if (!node) return;
@@ -66,42 +69,119 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
     }
   }, [messages.length]);
 
-  // When panel opens, scroll to bottom + focus input.
+  // When panel opens, mark "collapsed unread" as read, scroll, focus input.
   useEffect(() => {
     if (open) {
       requestAnimationFrame(() => {
         if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
         inputRef.current?.focus();
       });
+      // Mark all current visible-scope messages as read for the active tab.
+      markScopeAsRead(scopeMode);
+      // Mark collapsed as read entirely.
+      const lastMsg = messages[messages.length - 1];
+      setLastSeenIds((prev) => ({ ...prev, collapsed: lastMsg ? lastMsg.id : null }));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // If user moves into a zone and they had it set, the zone tab becomes
-  // available; if they leave a zone, snap back to room.
+  // Mark active tab as read whenever it changes (or new messages arrive in it).
+  // Effect below; depends on filtered messages.
+
+  // Snap back to room tab if user leaves their zone.
   useEffect(() => {
     if (!location.zone && scopeMode === 'zone') {
       setScopeMode('room');
     }
   }, [location.zone, scopeMode]);
 
-  // Compute filtered messages based on scope toggle.
-  const visibleMessages = useMemo(() => {
+  // Click outside: if the user clicks anywhere outside the panel
+  // while the input has focus, blur the input (keeping panel open).
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (!panelRef.current) return;
+      if (panelRef.current.contains(e.target as Node)) return;
+      // Click outside the panel: blur input if focused.
+      if (document.activeElement === inputRef.current) {
+        inputRef.current?.blur();
+      }
+    };
+    window.addEventListener('mousedown', onMouseDown);
+    return () => window.removeEventListener('mousedown', onMouseDown);
+  }, [open]);
+
+  // Compute filtered messages per scope, plus unread counts.
+  const { roomMessages, zoneMessages, visibleMessages } = useMemo(() => {
     const roomKey = `room:${location.room}`;
     const zoneKey = location.zone ? `zone:${location.zone}` : null;
 
-    return messages.filter((m) => {
-      // System messages always visible to everyone in the room they target.
-      if (m.kind === 'system') return m.scope === roomKey;
-      if (scopeMode === 'zone' && zoneKey) {
-        return m.scope === zoneKey;
+    const room: ChatMessage[] = [];
+    const zone: ChatMessage[] = [];
+
+    for (const m of messages) {
+      if (m.kind === 'system') {
+        if (m.scope === roomKey) room.push(m);
+        continue;
       }
-      // Room mode shows room-scoped messages + your own zone messages,
-      // so you can see what you sent without toggling.
-      return m.scope === roomKey || m.scope === zoneKey;
-    });
+      if (m.scope === roomKey) room.push(m);
+      if (zoneKey && m.scope === zoneKey) zone.push(m);
+    }
+
+    const visible = scopeMode === 'zone' && zoneKey ? zone : room;
+    return { roomMessages: room, zoneMessages: zone, visibleMessages: visible };
   }, [messages, scopeMode, location]);
 
-  // ----- Imperative API exposed to keyboard handler
+  /**
+   * Count messages in a scope that came after the last-seen id, excluding
+   * the current user's own messages.
+   */
+  const countUnread = useCallback(
+    (list: ChatMessage[], lastSeenId: string | null): number => {
+      if (list.length === 0) return 0;
+      let startIdx = 0;
+      if (lastSeenId) {
+        const idx = list.findIndex((m) => m.id === lastSeenId);
+        startIdx = idx >= 0 ? idx + 1 : 0;
+      }
+      let count = 0;
+      for (let i = startIdx; i < list.length; i++) {
+        const m = list[i];
+        if (m.kind === 'system') { count++; continue; }
+        if (user && m.senderUid === user.uid) continue;
+        count++;
+      }
+      return count;
+    },
+    [user]
+  );
+
+  const collapsedUnread = countUnread(messages.filter((m) => {
+    // Only messages that *would* be visible to the user count toward collapsed.
+    if (m.kind === 'system') return m.scope === `room:${location.room}`;
+    return m.scope === `room:${location.room}` ||
+      (location.zone && m.scope === `zone:${location.zone}`);
+  }), lastSeenIds.collapsed);
+
+  const roomUnread = countUnread(roomMessages, lastSeenIds.room);
+  const zoneUnread = location.zone ? countUnread(zoneMessages, lastSeenIds.zone) : 0;
+
+  // Mark scope as read when active.
+  function markScopeAsRead(scope: 'room' | 'zone') {
+    const list = scope === 'zone' ? zoneMessages : roomMessages;
+    const last = list[list.length - 1];
+    setLastSeenIds((prev) => ({ ...prev, [scope]: last ? last.id : prev[scope] }));
+  }
+
+  // Whenever new messages arrive while the panel is open, mark the current
+  // active tab as read.
+  useEffect(() => {
+    if (!open) return;
+    markScopeAsRead(scopeMode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, scopeMode, visibleMessages.length]);
+
+  // ----- Imperative API
 
   useImperativeHandle(ref, () => ({
     toggle: () => setOpen((prev) => !prev),
@@ -118,7 +198,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
     const actions = getChatActions();
     if (!actions) return;
 
-    // Determine the scope to send with: must be a real scope id.
     const zoneScope = location.zone ? `zone:${location.zone}` : null;
     const roomScope = `room:${location.room}`;
     const scope = scopeMode === 'zone' && zoneScope ? zoneScope : roomScope;
@@ -136,139 +215,208 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      // The keyboard hook also handles Enter; we let that fire and call submit
-      // via the imperative API, so we just stop the event from bubbling here.
       sendCurrentInput();
     }
   };
 
   const handleReact = (messageId: string, emoji: string) => {
     getChatActions()?.react(messageId, emoji);
-    setEmojiPickerFor(null);
+    setReactionPickerFor(null);
   };
 
   const handleBump = (message: ChatMessage) => {
     getChatActions()?.bump(message.id);
   };
 
+  const handleInsertEmoji = (emojiId: string) => {
+    const emoji = getEmoji(emojiId);
+    if (!emoji) return;
+    setInput((prev) => prev + emoji.char);
+    setComposerPickerOpen(false);
+    inputRef.current?.focus();
+  };
+
+  const switchScope = (mode: 'room' | 'zone') => {
+    setScopeMode(mode);
+    markScopeAsRead(mode);
+  };
+
   return (
-    <aside
-      className={`chat-panel ${open ? 'chat-panel--open' : ''}`}
-      aria-hidden={!open}
-      onClick={() => emojiPickerFor && setEmojiPickerFor(null)}
-    >
-      <header className="chat-panel__header">
-        <div className="chat-panel__tabs" role="tablist">
-          <button
-            role="tab"
-            aria-selected={scopeMode === 'room'}
-            className={`chat-tab ${scopeMode === 'room' ? 'chat-tab--active' : ''}`}
-            onClick={() => setScopeMode('room')}
-          >
-            Room
-          </button>
-          <button
-            role="tab"
-            aria-selected={scopeMode === 'zone'}
-            className={`chat-tab ${scopeMode === 'zone' ? 'chat-tab--active' : ''}`}
-            disabled={!location.zone}
-            onClick={() => setScopeMode('zone')}
-            title={location.zone ? 'Zone-only chat' : 'Walk into a zone to enable'}
-          >
-            Zone
-          </button>
-        </div>
+    <>
+      {/* Collapsed-state floating arrow with unread badge. Only shows when panel is closed. */}
+      {!open && (
         <button
-          className="chat-panel__close"
           type="button"
-          aria-label="Close chat"
-          onClick={() => setOpen(false)}
-        >×</button>
-      </header>
+          className="chat-tab-handle"
+          aria-label={`Open chat${collapsedUnread > 0 ? `, ${collapsedUnread} new` : ''}`}
+          onClick={() => setOpen(true)}
+        >
+          <span className="chat-tab-handle__arrow" aria-hidden="true">‹</span>
+          {collapsedUnread > 0 && (
+            <span className="chat-tab-handle__badge" aria-hidden="true">
+              {collapsedUnread > 99 ? '99+' : collapsedUnread}
+            </span>
+          )}
+        </button>
+      )}
 
-      <div className="chat-panel__list" ref={listRef}>
-        {visibleMessages.length === 0 ? (
-          <div className="chat-panel__empty">
-            {scopeMode === 'zone'
-              ? 'No messages in this zone yet.'
-              : 'No messages yet. Say hi.'}
+      <aside
+        ref={panelRef}
+        className={`chat-panel ${open ? 'chat-panel--open' : ''}`}
+        aria-hidden={!open}
+        onClick={() => {
+          if (reactionPickerFor) setReactionPickerFor(null);
+          if (composerPickerOpen) setComposerPickerOpen(false);
+        }}
+      >
+        <header className="chat-panel__header">
+          <div className="chat-panel__tabs" role="tablist">
+            <button
+              role="tab"
+              aria-selected={scopeMode === 'room'}
+              className={`chat-tab ${scopeMode === 'room' ? 'chat-tab--active' : ''}`}
+              onClick={() => switchScope('room')}
+            >
+              Room
+              {scopeMode !== 'room' && roomUnread > 0 && (
+                <span className="chat-tab__badge">{roomUnread > 99 ? '99+' : roomUnread}</span>
+              )}
+            </button>
+            <button
+              role="tab"
+              aria-selected={scopeMode === 'zone'}
+              className={`chat-tab ${scopeMode === 'zone' ? 'chat-tab--active' : ''}`}
+              disabled={!location.zone}
+              onClick={() => switchScope('zone')}
+              title={location.zone ? 'Zone-only chat' : 'Walk into a zone to enable'}
+            >
+              Zone
+              {scopeMode !== 'zone' && zoneUnread > 0 && (
+                <span className="chat-tab__badge">{zoneUnread > 99 ? '99+' : zoneUnread}</span>
+              )}
+            </button>
           </div>
-        ) : (
-          visibleMessages.map((m) => (
-            <ChatMessageItem
-              key={m.id}
-              message={m}
-              messages={messages}
-              myUid={user?.uid ?? null}
-              onReact={handleReact}
-              onReply={(target) => { setReplyTo(target); setQuoteOf(null); inputRef.current?.focus(); }}
-              onQuote={(target) => { setQuoteOf(target); setReplyTo(null); inputRef.current?.focus(); }}
-              onBump={handleBump}
-              onOpenEmojiPicker={(id) => setEmojiPickerFor(id)}
-            />
-          ))
-        )}
-      </div>
+          <button
+            className="chat-panel__close"
+            type="button"
+            aria-label="Close chat"
+            onClick={() => setOpen(false)}
+          >×</button>
+        </header>
 
-      {(replyTo || quoteOf) && (
-        <div className="chat-composer-meta">
-          {replyTo && (
-            <>
-              <span className="chat-composer-meta__label">↪ Replying to</span>
-              <span className="chat-composer-meta__name">{replyTo.senderName}</span>
-              <span className="chat-composer-meta__text">{replyTo.text}</span>
-            </>
+        <div className="chat-panel__list" ref={listRef}>
+          {visibleMessages.length === 0 ? (
+            <div className="chat-panel__empty">
+              {scopeMode === 'zone' ? 'No messages in this zone yet.' : 'No messages yet. Say hi.'}
+            </div>
+          ) : (
+            visibleMessages.map((m) => (
+              <ChatMessageItem
+                key={m.id}
+                message={m}
+                messages={messages}
+                myUid={user?.uid ?? null}
+                onReact={handleReact}
+                onReply={(target) => { setReplyTo(target); setQuoteOf(null); inputRef.current?.focus(); }}
+                onQuote={(target) => { setQuoteOf(target); setReplyTo(null); inputRef.current?.focus(); }}
+                onBump={handleBump}
+                onOpenEmojiPicker={(id) => setReactionPickerFor(id)}
+              />
+            ))
           )}
-          {quoteOf && (
-            <>
-              <span className="chat-composer-meta__label">❝ Quoting</span>
-              <span className="chat-composer-meta__name">{quoteOf.senderName}</span>
-              <span className="chat-composer-meta__text">{quoteOf.text}</span>
-            </>
-          )}
+        </div>
+
+        {(replyTo || quoteOf) && (
+          <div className="chat-composer-meta">
+            {replyTo && (
+              <>
+                <span className="chat-composer-meta__label">↪ Replying to</span>
+                <span className="chat-composer-meta__name">{replyTo.senderName}</span>
+                <span className="chat-composer-meta__text">{replyTo.text}</span>
+              </>
+            )}
+            {quoteOf && (
+              <>
+                <span className="chat-composer-meta__label">❝ Quoting</span>
+                <span className="chat-composer-meta__name">{quoteOf.senderName}</span>
+                <span className="chat-composer-meta__text">{quoteOf.text}</span>
+              </>
+            )}
+            <button
+              type="button"
+              className="chat-composer-meta__cancel"
+              onClick={() => { setReplyTo(null); setQuoteOf(null); }}
+              aria-label="Cancel"
+            >×</button>
+          </div>
+        )}
+
+        <div className="chat-panel__compose">
+          <input
+            ref={inputRef}
+            type="text"
+            className="chat-input"
+            placeholder={
+              scopeMode === 'zone' && location.zone ? 'Message in zone…' : 'Message in room…'
+            }
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleInputKeyDown}
+            maxLength={500}
+          />
           <button
             type="button"
-            className="chat-composer-meta__cancel"
-            onClick={() => { setReplyTo(null); setQuoteOf(null); }}
-            aria-label="Cancel"
-          >×</button>
+            className="chat-emoji-btn"
+            onClick={(e) => { e.stopPropagation(); setComposerPickerOpen((o) => !o); }}
+            title="Insert emoji"
+            aria-label="Insert emoji"
+          >
+            <SmileyIcon />
+          </button>
+          <button
+            type="button"
+            className="chat-send"
+            onClick={sendCurrentInput}
+            disabled={input.trim().length === 0}
+            aria-label="Send"
+          >Send</button>
         </div>
-      )}
 
-      <div className="chat-panel__compose">
-        <input
-          ref={inputRef}
-          type="text"
-          className="chat-input"
-          placeholder={
-            scopeMode === 'zone' && location.zone
-              ? `Message in zone…`
-              : `Message in room…`
-          }
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleInputKeyDown}
-          maxLength={500}
-        />
-        <button
-          type="button"
-          className="chat-send"
-          onClick={sendCurrentInput}
-          disabled={input.trim().length === 0}
-          aria-label="Send"
-        >Send</button>
-      </div>
+        {/* Reaction picker (overlays the panel for picking a reaction emoji) */}
+        {reactionPickerFor && (
+          <div className="chat-panel__emoji-overlay">
+            <EmojiPicker
+              title="React with…"
+              onPick={(emojiId) => handleReact(reactionPickerFor, emojiId)}
+              onClose={() => setReactionPickerFor(null)}
+            />
+          </div>
+        )}
 
-      {emojiPickerFor && (
-        <div className="chat-panel__emoji-overlay">
-          <EmojiPicker
-            onPick={(emojiId) => handleReact(emojiPickerFor, emojiId)}
-            onClose={() => setEmojiPickerFor(null)}
-          />
-        </div>
-      )}
-    </aside>
+        {/* Composer emoji picker (inserts into input text) */}
+        {composerPickerOpen && (
+          <div className="chat-panel__emoji-overlay">
+            <EmojiPicker
+              title="Insert emoji"
+              onPick={handleInsertEmoji}
+              onClose={() => setComposerPickerOpen(false)}
+            />
+          </div>
+        )}
+      </aside>
+    </>
   );
 });
 
 ChatPanel.displayName = 'ChatPanel';
+
+function SmileyIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+      <circle cx="9" cy="10" r="1" fill="currentColor" />
+      <circle cx="15" cy="10" r="1" fill="currentColor" />
+      <path d="M8 14a4 4 0 0 0 8 0" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}

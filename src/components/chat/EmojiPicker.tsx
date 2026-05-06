@@ -1,20 +1,23 @@
 import { FLUENT_EMOJI, FluentEmoji } from './emojis';
+import { EmojiBadge } from './EmojiBadge';
 
 interface Props {
+  /** Called with the emoji's id when picked. */
   onPick: (emojiId: string) => void;
   onClose: () => void;
+  title?: string;
 }
 
-export function EmojiPicker({ onPick, onClose }: Props) {
+export function EmojiPicker({ onPick, onClose, title = 'Pick an emoji' }: Props) {
   return (
     <div
       className="emoji-picker"
       role="dialog"
-      aria-label="Pick an emoji"
+      aria-label={title}
       onClick={(e) => e.stopPropagation()}
     >
       <div className="emoji-picker__header">
-        <span>Pick an emoji</span>
+        <span>{title}</span>
         <button
           className="emoji-picker__close"
           type="button"
@@ -40,7 +43,7 @@ function EmojiButton({ emoji, onPick }: { emoji: FluentEmoji; onPick: (id: strin
       title={emoji.name}
       onClick={() => onPick(emoji.id)}
     >
-      <img src={emoji.url} alt={emoji.name} loading="lazy" draggable={false} />
+      <EmojiBadge id={emoji.id} size={32} />
     </button>
   );
 }
