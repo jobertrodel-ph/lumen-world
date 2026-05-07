@@ -20,9 +20,12 @@ const AVATAR_RADIUS = 20;
 const SEND_INTERVAL_MS = 50;
 const MOVE_EPSILON = 0.5;
 const AUDIBILITY_TICK_MS = 200;
-
-// How close the avatar needs to get to a waypoint before advancing.
 const WAYPOINT_REACHED_DIST = 6;
+
+// Throttle drag-issue: while right-button is held and pointer is moving, we
+// re-issue at most this often. Keeps A* costs bounded if the user sweeps
+// the cursor wildly. 80ms (~12hz) feels responsive without being wasteful.
+const DRAG_REISSUE_MS = 80;
 
 interface ArrowKeys {
   up: Phaser.Input.Keyboard.Key;
@@ -69,13 +72,16 @@ export default class WorldScene extends Phaser.Scene {
   private hudZoneLabel?: Phaser.GameObjects.Text;
   private currentZone = '';
 
-  // ---- Pathfinding state ----
+  // Pathfinding state
   private currentPath: Array<{ x: number; y: number }> = [];
   private pathIndex = 0;
   private destIndicator: Phaser.GameObjects.Container | null = null;
   private destIndicatorTween: Phaser.Tweens.Tween | null = null;
 
-  // Settings — current active values for movement mode etc.
+  // Right-button drag state
+  private rightButtonHeld = false;
+  private lastDragIssueAt = 0;
+
   private settingsUnsubscribe: (() => void) | null = null;
 
   constructor() {
@@ -116,7 +122,6 @@ export default class WorldScene extends Phaser.Scene {
     this.applyResponsiveZoom();
     this.scale.on('resize', () => this.applyResponsiveZoom());
 
-    // Arrow keys (fallback movement).
     this.arrowKeys = {
       up:    this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.UP),
       down:  this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.DOWN),
@@ -124,17 +129,42 @@ export default class WorldScene extends Phaser.Scene {
       right: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.RIGHT),
     };
 
-    // Right-click handler — set destination.
-    // Phaser pointer events fire from the canvas itself.
-    this.input.mouse?.disableContextMenu();   // suppress browser context menu on right-click
+    // Right-click + drag movement system.
+    this.input.mouse?.disableContextMenu();
+
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      // Only react to right mouse button (button 2). Ignore left/middle.
       if (pointer.rightButtonDown()) {
-        // Convert from camera/screen space to world space.
-        const worldX = pointer.worldX;
-        const worldY = pointer.worldY;
-        this.handleClickToMove(worldX, worldY);
+        this.rightButtonHeld = true;
+        this.lastDragIssueAt = this.time.now;
+        this.handleClickToMove(pointer.worldX, pointer.worldY);
       }
+    });
+
+    // While the right button is held, re-issue on every meaningful move.
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (!this.rightButtonHeld) return;
+      // Phaser also clears button state if the OS thinks it's released.
+      if (!pointer.rightButtonDown()) {
+        this.rightButtonHeld = false;
+        return;
+      }
+      const now = this.time.now;
+      if (now - this.lastDragIssueAt < DRAG_REISSUE_MS) return;
+      this.lastDragIssueAt = now;
+      this.handleClickToMove(pointer.worldX, pointer.worldY);
+    });
+
+    this.input.on('pointerup', (pointer: Phaser.Input.Pointer) => {
+      // Right released → stop drag-tracking. We don't cancel the path —
+      // the avatar finishes walking to the last destination set.
+      if (pointer.button === 2 || !pointer.rightButtonDown()) {
+        this.rightButtonHeld = false;
+      }
+    });
+
+    // Edge case: pointer leaves the game canvas while held → end the drag.
+    this.input.on('pointerout', () => {
+      this.rightButtonHeld = false;
     });
 
     this.makeRoomHud();
@@ -264,26 +294,12 @@ export default class WorldScene extends Phaser.Scene {
     });
   }
 
-  // ---------------------------------------------------------------- pathing
-
-  /**
-   * User right-clicked at (worldX, worldY). Compute path and set the
-   * indicator. If the click is on a wall, the pathfinder snaps to nearest
-   * walkable cell; if no path exists, we just play a subtle "bad click"
-   * indicator and bail.
-   */
   private handleClickToMove(worldX: number, worldY: number): void {
-    // If a UI element above the canvas was clicked, ignore. Phaser already
-    // routes pointer events to scenes only when the canvas is the target,
-    // so this is mostly defensive.
     if (this.destroyed) return;
-
-    // If movement mode is "arrows", click-to-move is disabled.
     if (getActiveSettings().movementMode === 'arrows') return;
 
     const path = findPath(this.currentRoom, this.avatarX, this.avatarY, worldX, worldY);
     if (!path || path.length === 0) {
-      // No path — flash a red indicator to acknowledge the click.
       this.flashIndicator(worldX, worldY, 0xc84848);
       return;
     }
@@ -296,16 +312,11 @@ export default class WorldScene extends Phaser.Scene {
   private placeDestIndicator(x: number, y: number): void {
     this.clearDestIndicator();
     const container = this.add.container(x, y).setDepth(5);
-
-    // Outer ring + inner dot. RTS-ish.
     const outer = this.add.circle(0, 0, 18, 0x7fc4a3, 0.0);
     outer.setStrokeStyle(2, 0x7fc4a3, 0.85);
     const dot = this.add.circle(0, 0, 4, 0x7fc4a3, 0.95);
-
     container.add([outer, dot]);
     this.destIndicator = container;
-
-    // Pulse the ring.
     this.destIndicatorTween = this.tweens.add({
       targets: outer,
       scale: { from: 0.6, to: 1.4 },
@@ -336,17 +347,11 @@ export default class WorldScene extends Phaser.Scene {
     this.destIndicator = null;
   }
 
-  /**
-   * Cancel the current path. Used when arrow keys are pressed (manual
-   * override) or when the avatar arrives at the final waypoint.
-   */
   private cancelPath(): void {
     this.currentPath = [];
     this.pathIndex = 0;
     this.clearDestIndicator();
   }
-
-  // ---------------------------------------------------------- network handlers
 
   private handlePlayerAdd(sessionId: string, p: RemotePlayerData): void {
     if (this.destroyed || !this.sys.isActive()) return;
@@ -403,7 +408,7 @@ export default class WorldScene extends Phaser.Scene {
     this.currentRoom = newRoom;
     this.avatarSprite.container.setPosition(x, y);
     this.avatarX = x; this.avatarY = y;
-    this.cancelPath();   // a portal teleport invalidates the current path
+    this.cancelPath();
     this.renderRoom(newRoom);
     this.updateCameraBounds();
     this.updateRoomHud(newRoom);
@@ -466,8 +471,6 @@ export default class WorldScene extends Phaser.Scene {
     );
   }
 
-  // ---------------------------------------------------------------- main loop
-
   update(time: number, delta: number) {
     if (this.destroyed) return;
 
@@ -477,7 +480,6 @@ export default class WorldScene extends Phaser.Scene {
 
     let vx = 0, vy = 0;
 
-    // Arrow keys (or click in arrows mode) — manual movement, cancels current path.
     if (!typing) {
       if (this.arrowKeys.left.isDown) vx -= 1;
       if (this.arrowKeys.right.isDown) vx += 1;
@@ -485,12 +487,10 @@ export default class WorldScene extends Phaser.Scene {
       if (this.arrowKeys.down.isDown) vy += 1;
     }
 
-    // If user is using arrow keys, cancel any active path.
     if (vx !== 0 || vy !== 0) {
       if (this.currentPath.length > 0) this.cancelPath();
     }
 
-    // Joystick (mobile) — also cancels path.
     if (vx === 0 && vy === 0) {
       const j = readJoystick();
       if (j.x !== 0 || j.y !== 0) {
@@ -504,7 +504,6 @@ export default class WorldScene extends Phaser.Scene {
       vy *= inv;
     }
 
-    // If we have a current path and no manual input, follow it.
     if (vx === 0 && vy === 0 && this.currentPath.length > 0 && settings.movementMode === 'click') {
       const next = this.currentPath[this.pathIndex];
       const dx = next.x - this.avatarX;
@@ -512,7 +511,6 @@ export default class WorldScene extends Phaser.Scene {
       const dist = Math.hypot(dx, dy);
 
       if (dist <= WAYPOINT_REACHED_DIST || dist <= stepSize) {
-        // Snap to waypoint and advance.
         this.avatarX = next.x;
         this.avatarY = next.y;
         this.pathIndex++;
@@ -523,7 +521,6 @@ export default class WorldScene extends Phaser.Scene {
         const move = stepSize / dist;
         const nextX = this.avatarX + dx * move;
         const nextY = this.avatarY + dy * move;
-        // Sanity: still respect collision.
         if (!isBlocked(this.currentRoom, nextX, this.avatarY, AVATAR_RADIUS)) {
           this.avatarX = nextX;
         }
@@ -532,7 +529,6 @@ export default class WorldScene extends Phaser.Scene {
         }
       }
     } else if (vx !== 0 || vy !== 0) {
-      // Manual movement (arrows or joystick).
       const nextX = this.avatarX + vx * stepSize;
       const nextY = this.avatarY + vy * stepSize;
       const room = ROOMS[this.currentRoom];
@@ -545,7 +541,6 @@ export default class WorldScene extends Phaser.Scene {
     this.avatarSprite.container.setPosition(this.avatarX, this.avatarY);
     this.nameTag.setPosition(this.avatarX, this.avatarY - 38);
 
-    // Compute movement direction for animation.
     const dxThisFrame = this.avatarX - this.lastSentX;
     const dyThisFrame = this.avatarY - this.lastSentY;
     const moving = Math.hypot(dxThisFrame, dyThisFrame) > 0.5 ||
@@ -598,15 +593,11 @@ export default class WorldScene extends Phaser.Scene {
   }
 }
 
-/** Subscribe scene to settings — currently used only to cancel an active path
- *  when the user switches to "arrows" mode. */
 function setActiveSettingsListener(scene: WorldScene): void {
-  // Self-reference so the closure can hold a typed scene.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const s = scene as any;
   s.settingsUnsubscribe = subscribeSettings((settings) => {
     if (settings.movementMode === 'arrows') {
-      // Cancel any active path so it doesn't keep walking after the toggle.
       if (s.currentPath?.length > 0) {
         s.currentPath = [];
         s.pathIndex = 0;

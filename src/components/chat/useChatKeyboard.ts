@@ -2,16 +2,15 @@ import { useEffect, RefObject } from 'react';
 import type { ChatPanelHandle } from './ChatPanel';
 
 /**
- * Wires up the global Enter behavior for the chat panel:
+ * Global Enter behavior for the chat panel:
  *
- *  - Enter when panel is closed → open it, focus input.
- *  - Enter when input has focus AND is non-empty → send (handled by the
- *    panel's own keydown listener, not here, to avoid double-sending).
- *  - Enter when input has focus AND is empty → close the panel.
- *
- * Also blocks browser-default behaviors that would interfere
- * (e.g., Enter when no element has focus would do nothing, but we
- * still want to capture it).
+ *   - Enter while panel is closed → open and focus input.
+ *   - Enter while panel is open + input focused → handled by the input's own
+ *     keydown listener (which stops propagation), so we should never see it
+ *     here. Defensive check anyway: if we do, do nothing.
+ *   - Enter while panel is open + input NOT focused → re-focus the input.
+ *     (No close from this path; the close-on-empty-Enter happens inside the
+ *     input's handler where we know the actual input value.)
  */
 export function useChatKeyboard(panelRef: RefObject<ChatPanelHandle | null>): void {
   useEffect(() => {
@@ -21,50 +20,36 @@ export function useChatKeyboard(panelRef: RefObject<ChatPanelHandle | null>): vo
       const panel = panelRef.current;
       if (!panel) return;
 
-      // Don't hijack Enter when typing in *any* other input/textarea/contenteditable.
-      // (We only want to control the chat input + the world canvas.)
+      // Don't hijack Enter when typing in any other input/textarea/contenteditable.
       const target = e.target as HTMLElement | null;
       if (target) {
         const tag = target.tagName;
         const isContentEditable = target.isContentEditable;
         const isOurChatInput = target.classList.contains('chat-input');
-
-        if (!isOurChatInput && (tag === 'INPUT' || tag === 'TEXTAREA' || isContentEditable)) {
-          // Some other input is focused — leave Enter alone.
+        if (isOurChatInput) {
+          // The input itself handles this Enter (and stops propagation).
+          // If we somehow got here anyway, bail.
+          return;
+        }
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || isContentEditable) {
           return;
         }
       }
 
       const isOpen = panel.isOpen();
-      const inputFocused = panel.isInputFocused();
-      const inputEmpty = panel.isInputEmpty();
 
       if (!isOpen) {
-        // Open and focus.
+        // Open and focus the input.
         e.preventDefault();
-        panel.toggle();
+        panel.openAndFocus();
         return;
       }
 
-      // Panel is open.
-      if (inputFocused && inputEmpty) {
-        // Close.
+      // Panel open but input not focused — re-focus.
+      if (!panel.isInputFocused()) {
         e.preventDefault();
-        panel.toggle();
-        return;
+        panel.openAndFocus();
       }
-
-      // Panel is open but input not focused — focus the input.
-      if (!inputFocused) {
-        e.preventDefault();
-        panel.toggle();   // Toggle off then on to re-focus? No — easier: just toggle off and on.
-        // Actually just open which already focuses. But it's already open.
-        // Simplest: programmatically focus by toggling closed and open.
-        // But toggling closed and open is jarring; instead, fire a custom event
-        // that ChatPanel listens for. For now, do nothing — user can click input.
-        return;
-      }
-      // input focused + non-empty → let the input's own Enter handler send.
     };
 
     window.addEventListener('keydown', onKeyDown);

@@ -25,6 +25,10 @@ export interface ChatPanelHandle {
   isInputEmpty: () => boolean;
   isOpen: () => boolean;
   submit: () => void;
+  /** Open if closed, focus the input either way. */
+  openAndFocus: () => void;
+  /** Close and blur. */
+  closeAndBlur: () => void;
 }
 
 export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
@@ -40,16 +44,17 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
   const [composerPickerOpen, setComposerPickerOpen] = useState(false);
 
   // Last-seen-id tracker, used to compute unread counters per scope.
-  // We track separately for room and zone, plus an overall (collapsed) counter.
-  const [lastSeenIds, setLastSeenIds] = useState<{ collapsed: string | null; room: string | null; zone: string | null }>({
-    collapsed: null, room: null, zone: null,
-  });
+  const [lastSeenIds, setLastSeenIds] = useState<{
+    collapsed: string | null;
+    room: string | null;
+    zone: string | null;
+  }>({ collapsed: null, room: null, zone: null });
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Subscribe to bridge updates.
+  // ----- Subscribe to bridge updates.
   useEffect(() => {
     setMessages(getMessages());
     setLocation(getLocation());
@@ -69,34 +74,41 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
     }
   }, [messages.length]);
 
-  // When panel opens, mark "collapsed unread" as read, scroll, focus input.
-  useEffect(() => {
-    if (open) {
-      requestAnimationFrame(() => {
-        if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-        inputRef.current?.focus();
-      });
-      // Mark all current visible-scope messages as read for the active tab.
-      markScopeAsRead(scopeMode);
-      // Mark collapsed as read entirely.
-      const lastMsg = messages[messages.length - 1];
-      setLastSeenIds((prev) => ({ ...prev, collapsed: lastMsg ? lastMsg.id : null }));
+  // ----- Compute filtered message lists per scope (does NOT cause unread changes).
+  const { roomMessages, zoneMessages, visibleMessages, allVisibleToUser } = useMemo(() => {
+    const roomKey = `room:${location.room}`;
+    const zoneKey = location.zone ? `zone:${location.zone}` : null;
+
+    const room: ChatMessage[] = [];
+    const zone: ChatMessage[] = [];
+    const allVisible: ChatMessage[] = [];
+
+    for (const m of messages) {
+      const inRoom = m.scope === roomKey || (m.kind === 'system' && m.scope === roomKey);
+      const inZone = zoneKey != null && m.scope === zoneKey;
+
+      if (inRoom) room.push(m);
+      if (inZone) zone.push(m);
+      if (inRoom || inZone) allVisible.push(m);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
 
-  // Mark active tab as read whenever it changes (or new messages arrive in it).
-  // Effect below; depends on filtered messages.
+    const visible = scopeMode === 'zone' && zoneKey ? zone : room;
+    return {
+      roomMessages: room,
+      zoneMessages: zone,
+      visibleMessages: visible,
+      allVisibleToUser: allVisible,
+    };
+  }, [messages, scopeMode, location]);
 
-  // Snap back to room tab if user leaves their zone.
+  // ----- Snap back to room tab if user leaves their zone.
   useEffect(() => {
     if (!location.zone && scopeMode === 'zone') {
       setScopeMode('room');
     }
   }, [location.zone, scopeMode]);
 
-  // Click outside: if the user clicks anywhere outside the panel
-  // while the input has focus, blur the input (keeping panel open).
+  // ----- Click outside the panel: blur the input but keep panel open.
   useEffect(() => {
     if (!open) return;
     const onMouseDown = (e: MouseEvent) => {
@@ -111,31 +123,49 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
     return () => window.removeEventListener('mousedown', onMouseDown);
   }, [open]);
 
-  // Compute filtered messages per scope, plus unread counts.
-  const { roomMessages, zoneMessages, visibleMessages } = useMemo(() => {
-    const roomKey = `room:${location.room}`;
-    const zoneKey = location.zone ? `zone:${location.zone}` : null;
-
-    const room: ChatMessage[] = [];
-    const zone: ChatMessage[] = [];
-
-    for (const m of messages) {
-      if (m.kind === 'system') {
-        if (m.scope === roomKey) room.push(m);
-        continue;
+  // ----- Mark messages as read.
+  //
+  // The collapsed badge should match what the user has actually seen:
+  //   - When the panel is closed, messages arriving are unread.
+  //   - When the panel is open (regardless of which tab), all messages
+  //     visible-to-user are considered "seen" — we keep collapsed.lastSeen
+  //     pinned to the latest visible message.
+  //
+  // Per-tab badges: marked read when the tab is active. So the room tab
+  // updates only while it's selected; switching to zone freezes room's
+  // unread counter at whatever it's at and starts updating zone's.
+  useEffect(() => {
+    if (!open) return;
+    const lastVisible = allVisibleToUser[allVisibleToUser.length - 1];
+    if (!lastVisible) return;
+    setLastSeenIds((prev) => {
+      const next = { ...prev };
+      // Always pin collapsed when panel is open.
+      next.collapsed = lastVisible.id;
+      // Pin the active tab.
+      if (scopeMode === 'room') {
+        const lastRoom = roomMessages[roomMessages.length - 1];
+        if (lastRoom) next.room = lastRoom.id;
+      } else if (scopeMode === 'zone') {
+        const lastZone = zoneMessages[zoneMessages.length - 1];
+        if (lastZone) next.zone = lastZone.id;
       }
-      if (m.scope === roomKey) room.push(m);
-      if (zoneKey && m.scope === zoneKey) zone.push(m);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, scopeMode, allVisibleToUser.length, roomMessages.length, zoneMessages.length]);
+
+  // ----- When opening: scroll to bottom + focus input.
+  useEffect(() => {
+    if (open) {
+      requestAnimationFrame(() => {
+        if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+        inputRef.current?.focus();
+      });
     }
+  }, [open]);
 
-    const visible = scopeMode === 'zone' && zoneKey ? zone : room;
-    return { roomMessages: room, zoneMessages: zone, visibleMessages: visible };
-  }, [messages, scopeMode, location]);
-
-  /**
-   * Count messages in a scope that came after the last-seen id, excluding
-   * the current user's own messages.
-   */
+  /** Count messages in a list after lastSeenId, excluding the user's own. */
   const countUnread = useCallback(
     (list: ChatMessage[], lastSeenId: string | null): number => {
       if (list.length === 0) return 0;
@@ -156,45 +186,33 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
     [user]
   );
 
-  const collapsedUnread = countUnread(messages.filter((m) => {
-    // Only messages that *would* be visible to the user count toward collapsed.
-    if (m.kind === 'system') return m.scope === `room:${location.room}`;
-    return m.scope === `room:${location.room}` ||
-      (location.zone && m.scope === `zone:${location.zone}`);
-  }), lastSeenIds.collapsed);
-
+  const collapsedUnread = countUnread(allVisibleToUser, lastSeenIds.collapsed);
   const roomUnread = countUnread(roomMessages, lastSeenIds.room);
   const zoneUnread = location.zone ? countUnread(zoneMessages, lastSeenIds.zone) : 0;
 
-  // Mark scope as read when active.
-  function markScopeAsRead(scope: 'room' | 'zone') {
-    const list = scope === 'zone' ? zoneMessages : roomMessages;
-    const last = list[list.length - 1];
-    setLastSeenIds((prev) => ({ ...prev, [scope]: last ? last.id : prev[scope] }));
-  }
-
-  // Whenever new messages arrive while the panel is open, mark the current
-  // active tab as read.
-  useEffect(() => {
-    if (!open) return;
-    markScopeAsRead(scopeMode);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, scopeMode, visibleMessages.length]);
-
   // ----- Imperative API
-
+  // Important: openAndFocus and closeAndBlur are explicit because the global
+  // keyboard hook uses them. `toggle()` is kept for the visible button.
   useImperativeHandle(ref, () => ({
     toggle: () => setOpen((prev) => !prev),
     isInputFocused: () => document.activeElement === inputRef.current,
     isInputEmpty: () => input.trim().length === 0,
     isOpen: () => open,
     submit: () => sendCurrentInput(),
+    openAndFocus: () => {
+      setOpen(true);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    closeAndBlur: () => {
+      setOpen(false);
+      // Blur immediately so movement keys re-enable on the very next frame.
+      inputRef.current?.blur();
+    },
   }));
 
   const sendCurrentInput = useCallback(() => {
     const text = input.trim();
     if (!text) return;
-
     const actions = getChatActions();
     if (!actions) return;
 
@@ -212,10 +230,25 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
     setQuoteOf(null);
   }, [input, scopeMode, location, replyTo, quoteOf]);
 
+  /**
+   * Local Enter handler on the input. We MUST stopPropagation here so that
+   * the global window-level Enter handler doesn't ALSO fire — otherwise after
+   * sending (which empties the input), the global handler would see "input
+   * focused + empty" and close the panel.
+   */
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendCurrentInput();
+      e.stopPropagation();
+      const hasText = input.trim().length > 0;
+      if (hasText) {
+        sendCurrentInput();
+        // Stay open, stay focused.
+      } else {
+        // Empty input + Enter → close panel and blur input.
+        setOpen(false);
+        inputRef.current?.blur();
+      }
     }
   };
 
@@ -238,27 +271,35 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
 
   const switchScope = (mode: 'room' | 'zone') => {
     setScopeMode(mode);
-    markScopeAsRead(mode);
+    // Marking-as-read happens via the open+scope effect above.
+  };
+
+  const handleClose = () => {
+    setOpen(false);
+    inputRef.current?.blur();
   };
 
   return (
     <>
-      {/* Collapsed-state floating arrow with unread badge. Only shows when panel is closed. */}
-      {!open && (
-        <button
-          type="button"
-          className="chat-tab-handle"
-          aria-label={`Open chat${collapsedUnread > 0 ? `, ${collapsedUnread} new` : ''}`}
-          onClick={() => setOpen(true)}
-        >
-          <span className="chat-tab-handle__arrow" aria-hidden="true">‹</span>
-          {collapsedUnread > 0 && (
-            <span className="chat-tab-handle__badge" aria-hidden="true">
-              {collapsedUnread > 99 ? '99+' : collapsedUnread}
-            </span>
-          )}
-        </button>
-      )}
+      {/* Floating side handle. Always visible. Direction reflects open state. */}
+      <button
+        type="button"
+        className={`chat-tab-handle ${open ? 'chat-tab-handle--open' : ''}`}
+        aria-label={open ? 'Close chat' : `Open chat${collapsedUnread > 0 ? `, ${collapsedUnread} new` : ''}`}
+        aria-expanded={open}
+        onClick={() => (open ? handleClose() : setOpen(true))}
+        // When the panel is open, position the handle on its left edge.
+        style={open ? { right: 'min(360px, 90vw)' } : undefined}
+      >
+        <span className="chat-tab-handle__arrow" aria-hidden="true">
+          {open ? '›' : '‹'}
+        </span>
+        {!open && collapsedUnread > 0 && (
+          <span className="chat-tab-handle__badge" aria-hidden="true">
+            {collapsedUnread > 99 ? '99+' : collapsedUnread}
+          </span>
+        )}
+      </button>
 
       <aside
         ref={panelRef}
@@ -300,7 +341,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
             className="chat-panel__close"
             type="button"
             aria-label="Close chat"
-            onClick={() => setOpen(false)}
+            onClick={handleClose}
           >×</button>
         </header>
 
@@ -382,7 +423,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
           >Send</button>
         </div>
 
-        {/* Reaction picker (overlays the panel for picking a reaction emoji) */}
         {reactionPickerFor && (
           <div className="chat-panel__emoji-overlay">
             <EmojiPicker
@@ -393,7 +433,6 @@ export const ChatPanel = forwardRef<ChatPanelHandle>((_props, ref) => {
           </div>
         )}
 
-        {/* Composer emoji picker (inserts into input text) */}
         {composerPickerOpen && (
           <div className="chat-panel__emoji-overlay">
             <EmojiPicker
